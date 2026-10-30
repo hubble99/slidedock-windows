@@ -1,0 +1,7 @@
+# build output
+*.exe
+*.pdb
+
+# local backups and logs
+*.bak
+*.log
