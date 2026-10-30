@@ -959,9 +959,33 @@ namespace SlideDock
             APPBARDATA d = new APPBARDATA();
             d.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
             d.hWnd = tray;
-            if (prev < 0) prev = (int)Native.SHAppBarMessage(4, ref d);
+            if (prev < 0)
+            {
+                // pengaturan asli taskbar disimpan sekali ke file: auto-hide sengaja dibiarkan aktif saat Windows
+                // dimatikan, jadi keadaan "sekarang" belum tentu pengaturan asli Anda
+                prev = LoadOriginal();
+                if (prev < 0) { prev = (int)Native.SHAppBarMessage(4, ref d); SaveOriginal(prev); }
+            }
             d.lParam = (IntPtr)(on ? (prev | 1) : prev);
             Native.SHAppBarMessage(0xA, ref d);
+        }
+
+        static readonly string OrigFile = System.IO.Path.Combine(Store.Dir, "taskbar-original.txt");
+        static int LoadOriginal()
+        {
+            try { int v; if (File.Exists(OrigFile) && int.TryParse(File.ReadAllText(OrigFile).Trim(), out v)) return v; } catch { }
+            return -1;
+        }
+        static void SaveOriginal(int v)
+        {
+            try { Directory.CreateDirectory(Store.Dir); File.WriteAllText(OrigFile, v.ToString()); } catch { }
+        }
+
+        // Windows dimatikan / restart / sign out: biarkan auto-hide aktif agar saat login berikutnya taskbar lama
+        // sudah tersembunyi sebelum SlideDock berjalan. Hanya jendela taskbar yang ditampilkan lagi.
+        public static void KeepHiddenForNextLogin()
+        {
+            SetAutoHide(true);
         }
 
         public static void Apply()
@@ -5895,17 +5919,33 @@ namespace SlideDock
             }
         }
 
+        // catatan singkat kapan SlideDock mulai/berhenti dan kenapa (untuk melacak masalah saat Windows baru menyala)
+        static void Log(string s)
+        {
+            try
+            {
+                Directory.CreateDirectory(Store.Dir);
+                string f = System.IO.Path.Combine(Store.Dir, "startup.log");
+                if (File.Exists(f) && new FileInfo(f).Length > 200000) File.Delete(f);
+                File.AppendAllText(f, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + s + Environment.NewLine);
+            }
+            catch { }
+        }
+
         [STAThread]
         static void Main(string[] args)
         {
+            Log("start (pid " + Process.GetCurrentProcess().Id + (args.Length > 0 ? ", args: " + string.Join(" ", args) : "") + ")");
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { Log("CRASH: " + e.ExceptionObject); };
             bool created;
             using (Mutex m = new Mutex(true, "SlideDock.SingleInstance", out created))
             {
                 if (!created)
                 {
-                    // dimulai ulang karena jumlah monitor berubah: tunggu instance lama selesai
-                    if (Array.IndexOf(args, "--restart") < 0) return;
-                    try { if (!m.WaitOne(15000)) return; } catch (AbandonedMutexException) { }
+                    // instance lain masih berjalan (atau baru saja menutup): tunggu sebentar sebelum menyerah
+                    bool got = false;
+                    try { got = m.WaitOne(Array.IndexOf(args, "--restart") >= 0 ? 15000 : 4000); } catch (AbandonedMutexException) { got = true; }
+                    if (!got) { Log("another SlideDock is already running - exit"); return; }
                 }
                 bool restarting = false;
 
@@ -6091,14 +6131,11 @@ namespace SlideDock
                 foreach (DockWindow d in docks) d.MenuProvider = dockMenu;
 
                 // ganti posisi dock tanpa memulai ulang app: dock baru dibuat & tampil dulu, baru dock lama ditutup
-                changeSide = delegate(int side)
+                // bangun ulang dock untuk semua layar saat ini (dipakai saat ganti posisi & saat jumlah layar berubah)
+                Action rebuildDocks = delegate
                 {
-                    if (Layout.Side == side) return;
-                    app.Dispatcher.BeginInvoke(new Action(delegate                 // tunggu menu tertutup dulu
-                    {
                         hideAll();
                         foreach (DockWindow d in docks) d.HidePreview();
-                        Layout.Save(side);
                         List<DockWindow> old = new List<DockWindow>(docks);
                         List<DockWindow> fresh = new List<DockWindow>();
                         foreach (WF.Screen sc in WF.Screen.AllScreens.OrderByDescending(x => x.Primary))
@@ -6115,6 +6152,14 @@ namespace SlideDock
                         foreach (DockWindow d in fresh) d.Show();
                         foreach (DockWindow d in old) { try { d.Close(); } catch { } }
                         dock.RetryHotkey();
+                };
+                changeSide = delegate(int side)
+                {
+                    if (Layout.Side == side) return;
+                    app.Dispatcher.BeginInvoke(new Action(delegate                 // tunggu menu tertutup dulu
+                    {
+                        Layout.Save(side);
+                        rebuildDocks();
                     }), DispatcherPriority.Background);
                 };
                 tray.MouseClick += delegate(object s, WF.MouseEventArgs e)
@@ -6122,35 +6167,53 @@ namespace SlideDock
                     if (e.Button == WF.MouseButtons.Left) { use(dock); toggle(); }
                 };
 
-                app.Exit += delegate { WinKeyHook.Uninstall(); MenuCloser.Uninstall(); if (!restarting) TaskbarCtl.Restore(); };
-                // monitor dipasang/dilepas atau resolusi berubah
+                bool sessionEnding = false;
+                app.SessionEnding += delegate(object s, SessionEndingCancelEventArgs e)
+                {
+                    sessionEnding = true;
+                    Log("Windows " + (e.ReasonSessionEnding == ReasonSessionEnding.Shutdown ? "shutdown/restart" : "sign out") + ": keep taskbar auto-hide on");
+                    TaskbarCtl.KeepHiddenForNextLogin();
+                };
+                app.Exit += delegate
+                {
+                    WinKeyHook.Uninstall();
+                    MenuCloser.Uninstall();
+                    if (sessionEnding) { Log("exit (Windows ending session)"); return; }
+                    if (!restarting) TaskbarCtl.Restore();
+                    Log(restarting ? "exit (restart)" : "exit (taskbar restored)");
+                };
+                // monitor dipasang/dilepas atau resolusi berubah. Saat Windows baru menyala, sinyal ini datang
+                // beberapa kali berturut-turut (monitor kedua belum siap): tunggu 1,5 detik sampai tenang,
+                // lalu sesuaikan dock DI DALAM app yang sama (dulu app dimulai ulang -> bisa saling menutup).
+                DispatcherTimer displaySettle = new DispatcherTimer(DispatcherPriority.Background, app.Dispatcher);
+                displaySettle.Interval = TimeSpan.FromMilliseconds(1500);
+                displaySettle.Tick += delegate
+                {
+                    displaySettle.Stop();
+                    WF.Screen[] screens = WF.Screen.AllScreens.OrderByDescending(x => x.Primary).ToArray();
+                    bool same = screens.Length == docks.Count;
+                    for (int i = 0; same && i < screens.Length; i++) same = screens[i].DeviceName == docks[i].Device;
+                    if (same)
+                    {
+                        for (int i = 0; i < screens.Length; i++)
+                        {
+                            Rect r = dipOf(screens[i]);
+                            docks[i].ScreenDip = r;
+                            docks[i].ScreenScale = UI.ScaleOf(screens[i]);
+                            if (Layout.V) docks[i].Height = r.Height; else docks[i].Width = r.Width;
+                            docks[i].Reposition();
+                        }
+                        return;
+                    }
+                    Log("screens changed: " + docks.Count + " -> " + screens.Length + ", rebuilding docks");
+                    rebuildDocks();
+                };
                 Microsoft.Win32.SystemEvents.DisplaySettingsChanged += delegate
                 {
-                    app.Dispatcher.BeginInvoke(new Action(delegate
-                    {
-                        WF.Screen[] screens = WF.Screen.AllScreens.OrderByDescending(x => x.Primary).ToArray();
-                        if (screens.Length == docks.Count)
-                        {
-                            for (int i = 0; i < screens.Length; i++)
-                            {
-                                Rect r = dipOf(screens[i]);
-                                docks[i].ScreenDip = r;
-                                docks[i].ScreenScale = UI.ScaleOf(screens[i]);
-                                if (Layout.V) docks[i].Height = r.Height; else docks[i].Width = r.Width;
-                                docks[i].Reposition();
-                            }
-                            return;
-                        }
-                        // jumlah layar berubah: mulai ulang SlideDock agar setiap layar punya dock
-                        restarting = true;
-                        try { Process.Start(System.Reflection.Assembly.GetExecutingAssembly().Location, "--restart"); } catch { restarting = false; return; }
-                        tray.Visible = false;
-                        tray.Dispose();
-                        foreach (DockWindow d in docks) d.Close();
-                        app.Shutdown();
-                    }), DispatcherPriority.Background);
+                    app.Dispatcher.BeginInvoke(new Action(delegate { displaySettle.Stop(); displaySettle.Start(); }));
                 };
                 AppDomain.CurrentDomain.UnhandledException += delegate { WinKeyHook.Uninstall(); TaskbarCtl.Restore(); };
+                Log("running: " + docks.Count + " dock(s), position " + Layout.Side);
                 // error di tampilan: catat ke log, app tetap jalan (taskbar tidak "hilang")
                 app.DispatcherUnhandledException += delegate(object s, DispatcherUnhandledExceptionEventArgs e)
                 {
