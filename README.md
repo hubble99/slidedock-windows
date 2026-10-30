@@ -36,7 +36,7 @@ Double-click `SlideDock.exe`. The Windows taskbar is hidden while SlideDock runs
 - Theme: Glass / Dark
 - Position: Bottom / Left / Right
 - Windows key opens dock
-- Start with Windows
+- Start with Windows (creates a Task Scheduler task named "SlideDock" that runs at sign-in; it starts right away instead of waiting in the startup-apps queue)
 - Open settings folder
 - **Exit SlideDock (restore taskbar)**: closes the dock and brings the normal taskbar back
 

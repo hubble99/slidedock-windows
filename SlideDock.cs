@@ -5904,19 +5904,75 @@ namespace SlideDock
         const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         const string RunName = "SlideDock";
 
+        // Mulai bersama Windows lewat Task Scheduler (tugas "SlideDock" saat login), bukan daftar Run:
+        // daftar Run dijalankan Windows satu per satu setelah app lain (bisa ~1 menit), tugas login langsung jalan.
+        const string TaskName = "SlideDock";
+        static bool? autoStartCache;
+
+        static int RunHidden(string exe, string args)
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(exe, args);
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+                using (Process p = Process.Start(psi))
+                {
+                    p.StandardOutput.ReadToEnd();
+                    p.StandardError.ReadToEnd();
+                    p.WaitForExit(15000);
+                    return p.ExitCode;
+                }
+            }
+            catch { return -1; }
+        }
+
         static bool AutoStartOn()
         {
-            using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey))
-                return k != null && k.GetValue(RunName) != null;
+            if (autoStartCache == null) autoStartCache = RunHidden("schtasks.exe", "/Query /TN \"" + TaskName + "\"") == 0;
+            return autoStartCache.Value;
         }
 
         static void SetAutoStart(bool on)
         {
-            using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true))
+            // daftar Run lama tidak dipakai lagi (hindari dua cara start sekaligus)
+            try
             {
-                if (on) k.SetValue(RunName, "\"" + System.Reflection.Assembly.GetExecutingAssembly().Location + "\"");
-                else k.DeleteValue(RunName, false);
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true))
+                    if (k != null) k.DeleteValue(RunName, false);
             }
+            catch { }
+            if (!on)
+            {
+                RunHidden("schtasks.exe", "/Delete /TN \"" + TaskName + "\" /F");
+                autoStartCache = null;
+                return;
+            }
+            string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+            string user = Environment.UserDomainName + "\\" + Environment.UserName;
+            string xml =
+                "<?xml version=\"1.0\" encoding=\"UTF-16\"?>" +
+                "<Task version=\"1.4\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\">" +
+                "<RegistrationInfo><Description>Start SlideDock (dock that replaces the taskbar) at sign-in.</Description></RegistrationInfo>" +
+                "<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + System.Security.SecurityElement.Escape(user) + "</UserId></LogonTrigger></Triggers>" +
+                "<Principals><Principal id=\"Author\"><UserId>" + System.Security.SecurityElement.Escape(user) + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>" +
+                "<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" +
+                "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand>" +
+                "<Enabled>true</Enabled><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Priority>4</Priority>" +
+                "<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings>" +
+                "<Actions Context=\"Author\"><Exec><Command>" + System.Security.SecurityElement.Escape(exe) + "</Command>" +
+                "<WorkingDirectory>" + System.Security.SecurityElement.Escape(System.IO.Path.GetDirectoryName(exe)) + "</WorkingDirectory></Exec></Actions></Task>";
+            string f = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "slidedock-task-" + Guid.NewGuid().ToString("N") + ".xml");
+            try
+            {
+                File.WriteAllText(f, xml, Encoding.Unicode);
+                int rc = RunHidden("schtasks.exe", "/Create /TN \"" + TaskName + "\" /XML \"" + f + "\" /F");
+                Log("autostart task " + (rc == 0 ? "created" : "failed (" + rc + ")"));
+            }
+            finally { try { File.Delete(f); } catch { } }
+            autoStartCache = null;
         }
 
         // catatan singkat kapan SlideDock mulai/berhenti dan kenapa (untuk melacak masalah saat Windows baru menyala)
