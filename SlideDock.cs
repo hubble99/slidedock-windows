@@ -139,8 +139,35 @@ namespace SlideDock
 
         public static List<AppEntry> All()
         {
-            if (all == null || (DateTime.Now - loadedAt).TotalSeconds > 120) Load();
+            if (all == null) Load();
+            else if ((DateTime.Now - loadedAt).TotalSeconds > 120) LoadAsync(null);   // segarkan di latar, pakai daftar lama dulu
             return all;
+        }
+
+        public static bool Ready { get { return all != null; } }
+
+        // memuat daftar app di thread latar (STA, untuk COM Shell). done dipanggil di thread UI.
+        static bool loading;
+        static readonly List<Action> waiters = new List<Action>();
+        public static void LoadAsync(Action done)
+        {
+            System.Windows.Threading.Dispatcher ui = Application.Current != null ? Application.Current.Dispatcher : null;
+            lock (waiters)
+            {
+                if (done != null) waiters.Add(done);
+                if (loading) return;
+                loading = true;
+            }
+            Thread t = new Thread(delegate()
+            {
+                try { Load(); } catch { }
+                List<Action> l;
+                lock (waiters) { loading = false; l = new List<Action>(waiters); waiters.Clear(); }
+                if (ui != null) foreach (Action a in l) ui.BeginInvoke(a);
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.IsBackground = true;
+            t.Start();
         }
 
         static void Load()
@@ -1109,6 +1136,22 @@ namespace SlideDock
         }
     }
 
+    // jam animasi: waktu bertambah sesuai frame, tetapi satu frame yang terlambat (sistem sibuk) dihitung
+    // paling lama ~2 frame. Hasilnya animasi tidak pernah "melompat" — paling-paling sedikit lebih lambat.
+    class AnimClock
+    {
+        readonly Stopwatch sw = Stopwatch.StartNew();
+        double last, t;
+        public double Tick()
+        {
+            double now = sw.Elapsed.TotalMilliseconds;
+            double dt = now - last;
+            last = now;
+            t += Math.Min(dt, 34);
+            return t;
+        }
+    }
+
     // ================= jendela popup (panel Start & menu daya) =================
     class Popover : Window
     {
@@ -1159,11 +1202,13 @@ namespace SlideDock
             {
                 if (!IsOpen || anchorBottom < 0) return;
                 BeginAnimation(Window.TopProperty, null);
+                ++glideGen;                   // ukuran berubah di tengah animasi: langsung ke posisi akhir
                 if (Layout.V)
                 {
                     Point sp2 = SidePoint(new Size(ActualWidth, ActualHeight));
                     Left = sp2.X;
                     Top = sp2.Y;
+                    curPos = sp2;
                     UpdateLayout();
                     ApplySurface(false);
                     return;
@@ -1171,6 +1216,7 @@ namespace SlideDock
                 Top = anchorBottom - ActualHeight;
                 if (anchorRight > 0) Left = Math.Max(0, anchorRight - ActualWidth);
                 if (anchorCenter > 0) Left = Math.Max(0, anchorCenter - ActualWidth / 2);
+                curPos = new Point(Left, Top);
                 UpdateLayout();
                 ApplySurface(false);
             };
@@ -1308,6 +1354,7 @@ namespace SlideDock
         {
             MenuCloser.CloseAll();
             closing = false;
+            ++glideGen;                       // hentikan animasi tutup yang mungkin masih berjalan
             BeginAnimation(Window.TopProperty, null);
             BeginAnimation(Window.OpacityProperty, null);
             Opacity = 0;
@@ -1327,15 +1374,13 @@ namespace SlideDock
             anchorCenter = AnchorCenter ? Left + ActualWidth / 2 : -1;
             ApplySurface();
             shownAt = DateTime.Now;
-            // hanya geser naik, tanpa fade: memudarkan jendela transparan memaksa seluruh panel digambar ulang
-            // tiap frame (~20 fps saat GPU sibuk), sedangkan menggeser jendela murah (~60 fps)
-            DoubleAnimation slide = new DoubleAnimation(target + SlideDistance, target, TimeSpan.FromMilliseconds(230));
-            slide.EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut };
-            slide.Completed += delegate { BeginAnimation(Window.TopProperty, null); Top = target; };
-            Top = target + SlideDistance;    // frame pertama sudah di titik awal geser (bukan di posisi akhir lalu melompat turun)
+            // geser masuk dari arah dock (bawah, atau samping untuk dock kiri/kanan), tanpa fade:
+            // memudarkan jendela transparan memaksa seluruh panel digambar ulang tiap frame, menggeser jendela murah.
+            Point from = SlideOffset(p, SlideDistance);
+            MoveNow(from.X, from.Y);          // frame pertama sudah di titik awal (tidak melompat dari posisi akhir)
             Opacity = 1;
             Activate();
-            // frame pertama setelah tampil butuh ~100 ms untuk digambar. Mulai geser SETELAH frame itu jadi,
+            // frame pertama setelah tampil butuh ~100 ms untuk digambar: mulai geser SETELAH frame itu jadi,
             // supaya animasi tidak "terlewat" separuh lalu tersentak di akhir.
             int ticks = 0, gen = ++openGen;
             EventHandler onFrame = null;
@@ -1344,9 +1389,60 @@ namespace SlideDock
                 if (++ticks < 2) return;
                 CompositionTarget.Rendering -= onFrame;
                 if (closing || !IsVisible || gen != openGen) return;
-                BeginAnimation(Window.TopProperty, slide);
+                Glide(from, p, 260, false, null);
             };
             CompositionTarget.Rendering += onFrame;
+        }
+
+        // titik awal/akhir geser: dari arah dock
+        static Point SlideOffset(Point p, double d)
+        {
+            if (Layout.Side == 1) return new Point(p.X - d, p.Y);
+            if (Layout.Side == 2) return new Point(p.X + d, p.Y);
+            return new Point(p.X, p.Y + d);
+        }
+
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        double DeviceScale()
+        {
+            PresentationSource ps = PresentationSource.FromVisual(this);
+            return ps != null ? ps.CompositionTarget.TransformToDevice.M11 : 1;
+        }
+
+        // pindahkan jendela langsung (piksel layar, x & y sekaligus) tanpa melewati sistem layout WPF
+        void MoveNow(double x, double y)
+        {
+            IntPtr h = new WindowInteropHelper(this).Handle;
+            curPos = new Point(x, y);
+            if (h == IntPtr.Zero) { Left = x; Top = y; return; }
+            double k = DeviceScale();
+            SetWindowPos(h, IntPtr.Zero, (int)Math.Round(x * k), (int)Math.Round(y * k), 0, 0, 0x0001 | 0x0004 | 0x0010);
+        }
+
+        // gerak halus: posisi dihitung dari waktu yang benar-benar berlalu tiap frame layar,
+        // jadi tetap mulus & selesai tepat waktu walau ada frame yang terlambat
+        int glideGen;
+        Point curPos;
+        void Glide(Point from, Point to, int ms, bool accelerate, Action done)
+        {
+            int gen = ++glideGen;
+            Stopwatch sw = Stopwatch.StartNew();
+            AnimClock clock = new AnimClock();
+            EventHandler step = null;
+            step = delegate
+            {
+                if (gen != glideGen) { CompositionTarget.Rendering -= step; return; }
+                double t = Math.Min(1, clock.Tick() / ms);
+                double e = accelerate ? t * t * t : 1 - Math.Pow(1 - t, 3);      // ease-in (tutup) / ease-out (buka)
+                MoveNow(from.X + (to.X - from.X) * e, from.Y + (to.Y - from.Y) * e);
+                if (t < 1) return;
+                CompositionTarget.Rendering -= step;
+                Left = to.X;
+                Top = to.Y;
+                if (done != null) done();
+            };
+            CompositionTarget.Rendering += step;
         }
 
         public void HidePanel()
@@ -1354,23 +1450,29 @@ namespace SlideDock
             if (!IsOpen) return;
             HiddenAt = DateTime.Now;
             closing = true;
+            ++openGen;
             BeginAnimation(Window.TopProperty, null);
             BeginAnimation(Window.OpacityProperty, null);
-            // jendela transparan menyimpan gambar terakhirnya & menampilkannya lagi sesaat ketika dibuka ulang
-            // (terlihat seperti panel "melompat" ke bawah). Jadi kosongkan dulu (opacity 0), tunggu frame itu
-            // benar-benar tergambar, baru sembunyikan: saat dibuka lagi tidak ada sisa gambar lama.
-            Opacity = 0;
-            int ticks = 0;
-            EventHandler onFrame = null;
-            onFrame = delegate
+            // geser turun (atau kembali ke arah dock) lalu sembunyikan
+            Point cur = curPos;
+            Glide(cur, SlideOffset(cur, SlideDistance), 170, true, delegate
             {
-                if (++ticks < 3) return;
-                CompositionTarget.Rendering -= onFrame;
-                if (!closing) return;            // sudah dibuka lagi sebelum sempat disembunyikan
-                Hide();
-                closing = false;
-            };
-            CompositionTarget.Rendering += onFrame;
+                if (!closing) return;            // sudah dibuka lagi di tengah animasi
+                // jendela transparan menyimpan gambar terakhirnya & menampilkannya lagi sesaat ketika dibuka ulang.
+                // Kosongkan dulu (opacity 0), tunggu frame itu tergambar, baru sembunyikan.
+                Opacity = 0;
+                int ticks = 0;
+                EventHandler onFrame = null;
+                onFrame = delegate
+                {
+                    if (++ticks < 3) return;
+                    CompositionTarget.Rendering -= onFrame;
+                    if (!closing) return;
+                    Hide();
+                    closing = false;
+                };
+                CompositionTarget.Rendering += onFrame;
+            });
         }
     }
 
@@ -2024,7 +2126,7 @@ namespace SlideDock
             Launcher.Open("https://www.google.com/search?q=" + Uri.EscapeDataString(q));
         }
 
-        public void Prewarm() { Catalog.All(); }
+        public void Prewarm() { Catalog.LoadAsync(null); }   // di latar: tidak membekukan dock saat app baru jalan
 
         public void ShowPanel(double dockTop)
         {
@@ -2794,6 +2896,8 @@ namespace SlideDock
                 if (b == null) continue;
                 b.Width = tw;
                 StackPanel sp = b.Child as StackPanel;
+                Grid wrap = b.Child as Grid;                       // tile dengan centang (mode Add apps)
+                if (sp == null && wrap != null && wrap.Children.Count > 0) sp = wrap.Children[0] as StackPanel;
                 if (sp != null && sp.Children.Count > 1) { TextBlock tb = sp.Children[1] as TextBlock; if (tb != null) tb.MaxWidth = tw - 8; }
             }
         }
@@ -2849,18 +2953,112 @@ namespace SlideDock
             leftTitle.Text = "Choose apps for Start";
             addText.Text = "Done";
             filterBox.Visibility = Visibility.Visible;
+            int gen = ++addGen;
+            if (!Catalog.Ready)
+            {
+                // daftar app belum siap: tampilkan pesan, muat di latar, lalu susun ulang (dock tidak membeku)
+                TextBlock wait = Tiles.Note("Loading apps...");
+                wait.Margin = new Thickness(12, 30, 8, 6);
+                grid.Children.Add(wait);
+                Catalog.LoadAsync(delegate { if (addMode && gen == addGen) Rebuild(); });
+                return;
+            }
             HashSet<string> inStart = new HashSet<string>(items.Select(p => p.Target), StringComparer.OrdinalIgnoreCase);
             string q = filter.Text.Trim();
             HashSet<string> seen = new HashSet<string>(StringComparer.CurrentCultureIgnoreCase);
+            List<AppEntry> apps = new List<AppEntry>();
             foreach (AppEntry a in Catalog.Desktop().Concat(Catalog.All()).OrderBy(x => x.Name, StringComparer.CurrentCultureIgnoreCase))
             {
-                if (inStart.Contains(a.Target) || !seen.Add(a.Name)) continue;
+                if (!seen.Add(a.Name)) continue;
                 if (q.Length > 0 && a.Name.IndexOf(q, StringComparison.CurrentCultureIgnoreCase) < 0) continue;
-                AppEntry e = a;
-                Border t = Tiles.App(e.Name, Icons.For(e.Target), delegate { StartStore.Add(e.Target, e.Name); Rebuild(); });
-                t.ToolTip = "Click to add " + e.Name + " to Start";
-                grid.Children.Add(t);
+                apps.Add(a);
             }
+            // ~200 tile sekaligus membekukan panel ~0,6 detik: tampilkan 30 pertama langsung (yang terlihat),
+            // sisanya ditambahkan bertahap di latar
+            int idx = 0;
+            Action addBatch = null;
+            addBatch = delegate
+            {
+                if (gen != addGen || !addMode) return;
+                List<KeyValuePair<Image, string>> icons = new List<KeyValuePair<Image, string>>();
+                int n = idx == 0 ? 30 : 24;
+                for (; idx < apps.Count && n > 0; idx++, n--) AddAppTile(apps[idx], inStart, icons);
+                FitTiles();
+                LoadIconsGradually(icons, gen);
+                if (idx < apps.Count) Dispatcher.BeginInvoke(addBatch, DispatcherPriority.Background);
+            };
+            addBatch();
+        }
+
+        void AddAppTile(AppEntry a, HashSet<string> inStart, List<KeyValuePair<Image, string>> pendingIcons)
+        {
+                AppEntry e = a;
+                Border check = CheckBadge();
+                check.Visibility = inStart.Contains(e.Target) ? Visibility.Visible : Visibility.Collapsed;
+                Border t = null;
+                // klik = tambahkan (centang hijau muncul), klik lagi = hapus dari Start. App tetap di daftar.
+                t = Tiles.App(e.Name, null, delegate
+                {
+                    if (inStart.Contains(e.Target)) { StartStore.Remove(e.Target); inStart.Remove(e.Target); }
+                    else { StartStore.Add(e.Target, e.Name); inStart.Add(e.Target); }
+                    bool on = inStart.Contains(e.Target);
+                    check.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+                    t.ToolTip = on ? e.Name + " is in Start (click to remove)" : "Click to add " + e.Name + " to Start";
+                });
+                t.ToolTip = inStart.Contains(e.Target) ? e.Name + " is in Start (click to remove)" : "Click to add " + e.Name + " to Start";
+                StackPanel sp = t.Child as StackPanel;
+                if (sp != null)
+                {
+                    t.Child = null;
+                    Grid g = new Grid();
+                    g.Children.Add(sp);
+                    g.Children.Add(check);
+                    t.Child = g;
+                    Image img = sp.Children.Count > 0 ? sp.Children[0] as Image : null;
+                    if (img != null) pendingIcons.Add(new KeyValuePair<Image, string>(img, e.Target));
+                }
+                grid.Children.Add(t);
+        }
+
+        int addGen;
+
+        // centang hijau di pojok kanan atas tile
+        static Border CheckBadge()
+        {
+            Border b = new Border();
+            b.Width = 20;
+            b.Height = 20;
+            b.CornerRadius = new CornerRadius(10);
+            b.Background = new SolidColorBrush(Color.FromRgb(0x22, 0xC5, 0x5E));
+            b.BorderBrush = new SolidColorBrush(Color.FromArgb(0xCC, 255, 255, 255));
+            b.BorderThickness = new Thickness(1.5);
+            b.HorizontalAlignment = HorizontalAlignment.Right;
+            b.VerticalAlignment = VerticalAlignment.Top;
+            b.Margin = new Thickness(0, 4, 10, 0);
+            b.IsHitTestVisible = false;
+            TextBlock g = UI.Glyph("", 10);
+            g.FontWeight = FontWeights.Bold;
+            b.Child = g;
+            return b;
+        }
+
+        // ikon dimuat sedikit demi sedikit (maks ~12 ms per giliran) agar panel tetap responsif
+        void LoadIconsGradually(List<KeyValuePair<Image, string>> list, int gen)
+        {
+            int i = 0;
+            Action step = null;
+            step = delegate
+            {
+                if (gen != addGen || !addMode) return;
+                Stopwatch sw = Stopwatch.StartNew();
+                while (i < list.Count && sw.ElapsedMilliseconds < 12)
+                {
+                    try { list[i].Key.Source = Icons.For(list[i].Value); } catch { }
+                    i++;
+                }
+                if (i < list.Count) Dispatcher.BeginInvoke(step, DispatcherPriority.Background);
+            };
+            Dispatcher.BeginInvoke(step, DispatcherPriority.Background);
         }
     }
 
@@ -3735,16 +3933,52 @@ namespace SlideDock
             ncard.Margin = new Thickness(14, 14, 6, 14);
             nsp.Margin = new Thickness(14, 14, 14, 10);
             ncard.Child = nsp;
-            Grid two = new Grid();
-            two.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            two.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             ncard.VerticalAlignment = VerticalAlignment.Stretch;
             card.VerticalAlignment = VerticalAlignment.Stretch;
             two.Children.Add(ncard);
-            Grid.SetColumn(card, 1);
             two.Children.Add(card);
+            calCard = card;
+            notifCard = ncard;
+            notifScroll = nsv;
             Cards = new List<Border> { ncard, card };
             Content = two;
+            ArrangeCards();
+        }
+
+        readonly Grid two = new Grid();
+        Border calCard, notifCard;
+        ScrollViewer notifScroll;
+        bool? arrangedV;
+
+        // dock bawah: Notifications (kiri) + Calendar (kanan).
+        // dock kiri/kanan: Calendar (atas) + Notifications (bawah) agar rapi di samping dock.
+        void ArrangeCards()
+        {
+            bool v = Layout.V;
+            if (arrangedV == v) return;
+            arrangedV = v;
+            two.RowDefinitions.Clear();
+            two.ColumnDefinitions.Clear();
+            if (v)
+            {
+                two.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                two.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                Grid.SetColumn(calCard, 0); Grid.SetRow(calCard, 0);
+                Grid.SetColumn(notifCard, 0); Grid.SetRow(notifCard, 1);
+                calCard.Margin = new Thickness(14, 14, 14, 6);
+                notifCard.Margin = new Thickness(14, 6, 14, 14);
+                notifScroll.MaxHeight = 220;          // jaga total tinggi tetap muat di layar
+            }
+            else
+            {
+                two.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                two.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                Grid.SetRow(calCard, 0); Grid.SetColumn(calCard, 1);
+                Grid.SetRow(notifCard, 0); Grid.SetColumn(notifCard, 0);
+                calCard.Margin = new Thickness(6, 14, 14, 14);
+                notifCard.Margin = new Thickness(14, 14, 6, 14);
+                notifScroll.MaxHeight = 300;
+            }
         }
 
         FrameworkElement NavButton(string glyph, int delta)
@@ -3809,6 +4043,7 @@ namespace SlideDock
             if (IsOpen) return;
             month = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
             title.Text = Cap(DateTime.Today.ToString("dddd, d MMMM yyyy", Id));
+            ArrangeCards();
             LoadNotifs();
             Render();
             AnchorCenter = true;
@@ -4393,6 +4628,16 @@ namespace SlideDock
             AttachDockMenu(card);
             BuildNotch();
             Grid rootGrid = new Grid();
+            // lapisan bentuk transisi: satu bentuk yang melebar/menyusut antara notch & dock penuh
+            morphLayer = new Canvas();
+            morphLayer.IsHitTestVisible = false;
+            morphPath = new System.Windows.Shapes.Path();
+            morphGloss = new System.Windows.Shapes.Path();
+            morphPath.Visibility = Visibility.Collapsed;
+            morphGloss.Visibility = Visibility.Collapsed;
+            morphLayer.Children.Add(morphPath);
+            morphLayer.Children.Add(morphGloss);
+            rootGrid.Children.Add(morphLayer);
             rootGrid.Children.Add(card);
             rootGrid.Children.Add(notch);
             Content = rootGrid;
@@ -4662,37 +4907,114 @@ namespace SlideDock
             notch.Child = sp;
         }
 
-        // morph: satu bentuk menyusut/melebar ke ukuran bentuk lain sambil memudar
+        // ----- transisi notch <-> dock penuh (gaya Dynamic Island) -----
+        // SATU bentuk latar yang ukurannya berubah mulus dari notch ke dock (atau sebaliknya), digambar ulang
+        // tiap frame layar dari waktu yang benar-benar berlalu. Isi (ikon/teks) tidak ikut "ditarik":
+        // isi lama memudar cepat, isi baru muncul dengan sedikit membesar, ukurannya tetap proporsional.
+        Canvas morphLayer;
+        System.Windows.Shapes.Path morphPath, morphGloss;
+        int morphGen;
+        bool morphing;
+        Rect morphRect;
+        double morphRadius;
+
+        Rect RectIn(FrameworkElement e)
+        {
+            Point p = e.TranslatePoint(new Point(0, 0), morphLayer);
+            return new Rect(p, new Size(e.ActualWidth, e.ActualHeight));
+        }
+
+        static ScaleTransform ScaleOfContent(UIElement e)
+        {
+            ScaleTransform st = e.RenderTransform as ScaleTransform;
+            if (st == null || st.IsFrozen) { st = new ScaleTransform(1, 1); e.RenderTransform = st; }
+            e.RenderTransformOrigin = Layout.Origin;
+            return st;
+        }
+
+        static double Clamp01(double v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
         void SetCompact(bool c)
         {
             if (c == compact) return;
             compact = c;
-            FrameworkElement show = c ? (FrameworkElement)notch : fullCard;
-            FrameworkElement hide = c ? (FrameworkElement)fullCard : notch;
-            double sw = Math.Max(1, show.ActualWidth), shh = Math.Max(1, show.ActualHeight);
-            double hw = Math.Max(1, hide.ActualWidth), hh = Math.Max(1, hide.ActualHeight);
+            Border show = c ? notch : fullCard;
+            Border hide = c ? fullCard : notch;
             show.IsHitTestVisible = true;
             hide.IsHitTestVisible = false;
-            Morph(show, hw / sw, hh / shh, 1, 1, 0, 1, 300);
-            Morph(hide, 1, 1, sw / hw, shh / hh, 1, 0, 220);
-        }
-
-        static void Morph(FrameworkElement e, double fx, double fy, double tx, double ty, double fo, double to, int ms)
-        {
-            ScaleTransform st = new ScaleTransform(fx, fy);
-            e.RenderTransformOrigin = Layout.Origin;
-            e.RenderTransform = st;
-            Duration d = TimeSpan.FromMilliseconds(ms);
-            IEasingFunction ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
-            DoubleAnimation ax = new DoubleAnimation(fx, tx, d);
-            ax.EasingFunction = ease;
-            DoubleAnimation ay = new DoubleAnimation(fy, ty, d);
-            ay.EasingFunction = ease;
-            DoubleAnimation ao = new DoubleAnimation(fo, to, d);
-            ao.EasingFunction = ease;
-            st.BeginAnimation(ScaleTransform.ScaleXProperty, ax);
-            st.BeginAnimation(ScaleTransform.ScaleYProperty, ay);
-            e.BeginAnimation(UIElement.OpacityProperty, ao);
+            Grid sg = show.Child as Grid, hg = hide.Child as Grid;
+            bool ready = sg != null && hg != null && sg.Children.Count > 1 && hg.Children.Count > 1 && morphPath != null
+                         && show.ActualWidth > 0 && hide.ActualWidth > 0;
+            // awal: transparansi isi mengikuti keadaan terakhir (bisa sedang di tengah transisi)
+            double sStart = show.Opacity < 0.01 ? 0 : (ready ? sg.Children[1].Opacity : 1);
+            double hStart = hide.Opacity < 0.01 ? 0 : (ready ? hg.Children[1].Opacity : 1);
+            foreach (Border b in new Border[] { show, hide })
+            {
+                b.BeginAnimation(UIElement.OpacityProperty, null);
+                b.RenderTransform = Transform.Identity;
+                b.Opacity = 1;
+            }
+            if (!ready)
+            {
+                hide.Opacity = 0;
+                return;
+            }
+            UIElement sLayer = sg.Children[0], sContent = sg.Children[1];
+            UIElement hLayer = hg.Children[0], hContent = hg.Children[1];
+            sLayer.Opacity = 0;                   // latar masing-masing disembunyikan; bentuk transisi yang tampil
+            hLayer.Opacity = 0;
+            Rect from = morphing ? morphRect : RectIn(hide);
+            Rect to = RectIn(show);
+            double rFrom = morphing ? morphRadius : (c ? 20 : 14), rTo = c ? 14 : 20;
+            morphPath.Fill = fullShape.Fill;
+            morphPath.Stroke = fullShape.Stroke;
+            morphPath.StrokeThickness = fullShape.StrokeThickness;
+            morphGloss.Fill = fullGloss.Fill;
+            morphPath.Visibility = Visibility.Visible;
+            morphGloss.Visibility = Visibility.Visible;
+            ScaleTransform sScale = ScaleOfContent(sContent), hScale = ScaleOfContent(hContent);
+            sContent.Opacity = sStart;
+            int gen = ++morphGen;
+            morphing = true;
+            double ms = c ? 320 : 420;
+            Stopwatch sw = Stopwatch.StartNew();
+            AnimClock clock = new AnimClock();
+            EventHandler step = null;
+            step = delegate
+            {
+                if (gen != morphGen) { CompositionTarget.Rendering -= step; return; }
+                double t = Clamp01(clock.Tick() / ms);
+                double e;
+                if (c) e = t < 0.5 ? 4 * t * t * t : 1 - Math.Pow(-2 * t + 2, 3) / 2;          // menyusut: ease-in-out
+                else { double k = 1.15, u = t - 1; e = 1 + (k + 1) * u * u * u + k * u * u; } // melebar: sedikit memantul
+                Rect r = new Rect(from.X + (to.X - from.X) * e, from.Y + (to.Y - from.Y) * e,
+                                  Math.Max(1, from.Width + (to.Width - from.Width) * e), Math.Max(1, from.Height + (to.Height - from.Height) * e));
+                double rad = rFrom + (rTo - rFrom) * Clamp01(e);
+                morphRect = r;
+                morphRadius = rad;
+                Geometry geo = ShapeFor(r.Size, rad);
+                morphPath.Data = geo;
+                morphGloss.Data = geo;
+                Canvas.SetLeft(morphPath, r.X); Canvas.SetTop(morphPath, r.Y);
+                Canvas.SetLeft(morphGloss, r.X); Canvas.SetTop(morphGloss, r.Y);
+                double fin = Clamp01((t - 0.25) / 0.75); fin = 1 - (1 - fin) * (1 - fin);     // isi baru muncul setelah bentuk mulai berubah
+                double fout = Clamp01(t / 0.35);                                                 // isi lama hilang cepat
+                sContent.Opacity = sStart + (1 - sStart) * fin;
+                hContent.Opacity = hStart * (1 - fout);
+                double ss = 0.92 + 0.08 * fin, hs = 1 - 0.06 * fout;
+                sScale.ScaleX = ss; sScale.ScaleY = ss;
+                hScale.ScaleX = hs; hScale.ScaleY = hs;
+                if (t < 1) return;
+                CompositionTarget.Rendering -= step;
+                morphing = false;
+                sLayer.Opacity = 1;
+                sContent.Opacity = 1;
+                sScale.ScaleX = 1; sScale.ScaleY = 1;
+                hide.Opacity = 0;
+                morphPath.Visibility = Visibility.Collapsed;
+                morphGloss.Visibility = Visibility.Collapsed;
+            };
+            CompositionTarget.Rendering += step;
         }
         [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
         [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
