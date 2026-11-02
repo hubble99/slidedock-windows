@@ -1379,6 +1379,26 @@ namespace SlideDock
                 "<Border Background='#F2202026' BorderBrush='#40FFFFFF' BorderThickness='1' CornerRadius='8' Padding='10,5,10,6' Margin='8'>" +
                 "<Border.Effect><DropShadowEffect BlurRadius='12' ShadowDepth='2' Opacity='0.45'/></Border.Effect>" +
                 "<ContentPresenter/></Border></ControlTemplate></Setter.Value></Setter></Style>";
+            // scrollbar tipis & gelap (bukan scrollbar putih bawaan Windows)
+            string thumb = "<Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType='Thumb'>" +
+                "<Border x:Name='t' CornerRadius='3' Background='#50FFFFFF'/>" +
+                "<ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='t' Property='Background' Value='#90FFFFFF'/></Trigger>" +
+                "<Trigger Property='IsDragging' Value='True'><Setter TargetName='t' Property='Background' Value='#B0FFFFFF'/></Trigger></ControlTemplate.Triggers>" +
+                "</ControlTemplate></Thumb.Template></Thumb></Track.Thumb>";
+            string barXaml =
+                "<Style " + ns + " TargetType='ScrollBar'>" +
+                "<Setter Property='OverridesDefaultStyle' Value='True'/>" +
+                "<Setter Property='Background' Value='Transparent'/>" +
+                "<Setter Property='Width' Value='8'/><Setter Property='MinWidth' Value='8'/>" +
+                "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'>" +
+                "<Border Background='Transparent' Padding='2,2,1,2'><Track x:Name='PART_Track' IsDirectionReversed='True'>" + thumb + "</Track></Border>" +
+                "</ControlTemplate></Setter.Value></Setter>" +
+                "<Style.Triggers><Trigger Property='Orientation' Value='Horizontal'>" +
+                "<Setter Property='Width' Value='Auto'/><Setter Property='MinWidth' Value='0'/><Setter Property='Height' Value='8'/><Setter Property='MinHeight' Value='8'/>" +
+                "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'>" +
+                "<Border Background='Transparent' Padding='2,2,2,1'><Track x:Name='PART_Track' IsDirectionReversed='False'>" + thumb + "</Track></Border>" +
+                "</ControlTemplate></Setter.Value></Setter></Trigger></Style.Triggers></Style>";
+            try { app.Resources[typeof(ScrollBar)] = System.Windows.Markup.XamlReader.Parse(barXaml); } catch { }
             try
             {
                 app.Resources[typeof(ContextMenu)] = System.Windows.Markup.XamlReader.Parse(menuXaml);
@@ -5148,18 +5168,26 @@ namespace SlideDock
             Cards = new List<Border> { ncard, card };
             Content = two;
             ArrangeCards();
+            // notifikasi banyak + layar pendek: perpendek daftar notifikasi (tetap bisa digulir) sampai panel muat
+            SizeChanged += delegate
+            {
+                double over = ActualHeight - (Popover.Scr.Height - 16);
+                if (over > 1 && notifScroll.ActualHeight > 90) notifScroll.MaxHeight = Math.Max(90, notifScroll.ActualHeight - over);
+            };
         }
 
         readonly Grid two = new Grid();
         Border calCard, notifCard;
         ScrollViewer notifScroll;
         bool? arrangedV;
+        double notifMax = 300;
 
         // dock bawah: Notifications (kiri) + Calendar (kanan).
-        // dock kiri/kanan: Calendar (atas) + Notifications (bawah) agar rapi di samping dock.
+        // dock kiri/kanan: Calendar (atas) + Notifications (bawah) agar rapi di samping dock;
+        // tapi di layar pendek (< 760) tetap berdampingan supaya tidak melewati layar.
         void ArrangeCards()
         {
-            bool v = Layout.V;
+            bool v = Layout.V && Popover.Scr.Height >= 760;
             if (arrangedV == v) return;
             arrangedV = v;
             two.RowDefinitions.Clear();
@@ -5172,7 +5200,7 @@ namespace SlideDock
                 Grid.SetColumn(notifCard, 0); Grid.SetRow(notifCard, 1);
                 calCard.Margin = new Thickness(14, 14, 14, 6);
                 notifCard.Margin = new Thickness(14, 6, 14, 14);
-                notifScroll.MaxHeight = 220;          // jaga total tinggi tetap muat di layar
+                notifMax = 220;                       // jaga total tinggi tetap muat di layar
             }
             else
             {
@@ -5182,8 +5210,9 @@ namespace SlideDock
                 Grid.SetRow(notifCard, 0); Grid.SetColumn(notifCard, 0);
                 calCard.Margin = new Thickness(6, 14, 14, 14);
                 notifCard.Margin = new Thickness(14, 14, 6, 14);
-                notifScroll.MaxHeight = 300;
+                notifMax = 300;
             }
+            notifScroll.MaxHeight = notifMax;
         }
 
         FrameworkElement NavButton(string glyph, int delta)
@@ -5248,6 +5277,9 @@ namespace SlideDock
             if (IsOpen) return;
             SideAnchor = clock.Y;
             month = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
+            arrangedV = null;                         // layar bisa berbeda dari sebelumnya
+            ArrangeCards();
+            notifScroll.MaxHeight = notifMax;
             title.Text = Cap(DateTime.Today.ToString("dddd, d MMMM yyyy", Id));
             ArrangeCards();
             LoadNotifs();
