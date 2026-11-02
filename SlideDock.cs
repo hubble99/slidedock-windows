@@ -86,6 +86,55 @@ namespace SlideDock
         }
     }
 
+    // pengaturan dock kecil-kecil (key=angka) di %APPDATA%\SlideDock\prefs.txt
+    static class Prefs
+    {
+        static readonly string FileP = System.IO.Path.Combine(Store.Dir, "prefs.txt");
+        static Dictionary<string, int> map;
+
+        static void Load()
+        {
+            if (map != null) return;
+            map = new Dictionary<string, int>();
+            try
+            {
+                if (!File.Exists(FileP)) return;
+                foreach (string l in File.ReadAllLines(FileP))
+                {
+                    int eq = l.IndexOf('=');
+                    int v;
+                    if (eq > 0 && int.TryParse(l.Substring(eq + 1).Trim(), out v)) map[l.Substring(0, eq).Trim()] = v;
+                }
+            }
+            catch { }
+        }
+
+        public static int Get(string key, int def)
+        {
+            Load();
+            int v;
+            return map.TryGetValue(key, out v) ? v : def;
+        }
+
+        public static void Set(string key, int v)
+        {
+            Load();
+            map[key] = v;
+            try
+            {
+                Directory.CreateDirectory(Store.Dir);
+                File.WriteAllLines(FileP, map.Select(kv => kv.Key + "=" + kv.Value).ToArray());
+            }
+            catch { }
+        }
+
+        // 0 = mati, 1 = halus, 2 = kuat
+        public static int Magnify { get { return Get("magnify", 2); } set { Set("magnify", value); } }
+        public static bool Notch { get { return Get("notch", 1) != 0; } set { Set("notch", value ? 1 : 0); } }
+        public static bool WinKey { get { return Get("winkey", 1) != 0; } set { Set("winkey", value ? 1 : 0); } }
+        public static bool HideTaskbar { get { return Get("hidetaskbar", 1) != 0; } set { Set("hidetaskbar", value ? 1 : 0); } }
+    }
+
     static class Launcher
     {
         public static void Open(string target)
@@ -1126,12 +1175,69 @@ namespace SlideDock
                 "<ControlTemplate.Triggers><Trigger Property='IsHighlighted' Value='True'>" +
                 "<Setter TargetName='bd' Property='Background' Value='#30FFFFFF'/></Trigger></ControlTemplate.Triggers>" +
                 "</ControlTemplate></Setter.Value></Setter></Style>";
+            // tooltip gelap membulat, senada dengan dock (bukan kotak putih bawaan Windows)
+            string tipXaml =
+                "<Style " + ns + " TargetType='ToolTip'>" +
+                "<Setter Property='OverridesDefaultStyle' Value='True'/>" +
+                "<Setter Property='HasDropShadow' Value='False'/>" +
+                "<Setter Property='Foreground' Value='White'/>" +
+                "<Setter Property='FontFamily' Value='Segoe UI Variable Text, Segoe UI Variable, Segoe UI'/>" +
+                "<Setter Property='FontSize' Value='12'/>" +
+                "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ToolTip'>" +
+                "<Border Background='#F2202026' BorderBrush='#40FFFFFF' BorderThickness='1' CornerRadius='8' Padding='10,5,10,6' Margin='8'>" +
+                "<Border.Effect><DropShadowEffect BlurRadius='12' ShadowDepth='2' Opacity='0.45'/></Border.Effect>" +
+                "<ContentPresenter/></Border></ControlTemplate></Setter.Value></Setter></Style>";
             try
             {
                 app.Resources[typeof(ContextMenu)] = System.Windows.Markup.XamlReader.Parse(menuXaml);
                 app.Resources[typeof(MenuItem)] = System.Windows.Markup.XamlReader.Parse(itemXaml);
+                app.Resources[typeof(ToolTip)] = System.Windows.Markup.XamlReader.Parse(tipXaml);
             }
             catch { }
+        }
+
+        // tema Aurora: gradasi ungu -> biru -> toska seperti cahaya kutub
+        public static Brush AuroraTint(byte a)
+        {
+            LinearGradientBrush g = new LinearGradientBrush();
+            g.StartPoint = new Point(0, 0);
+            g.EndPoint = new Point(1, 1);
+            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x7B, 0x3F, 0xE4), 0));
+            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x2F, 0x6B, 0xFF), 0.5));
+            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x19, 0xC3, 0xB0), 1));
+            return g;
+        }
+
+        public static Brush AuroraEdge(byte a)
+        {
+            LinearGradientBrush g = new LinearGradientBrush();
+            g.StartPoint = new Point(0, 0);
+            g.EndPoint = new Point(1, 1);
+            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0xFF, 0x8A, 0xD8), 0));
+            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0xA9, 0x9B, 0xFF), 0.5));
+            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x70, 0xE6, 0xFF), 1));
+            return g;
+        }
+
+        // tooltip dock: muncul tepat di atas ikon (atau di sampingnya untuk dock kiri/kanan), bukan di bawah kursor
+        public static ToolTip Tip(FrameworkElement el, object content)
+        {
+            ToolTip tt = new ToolTip();
+            tt.Content = content;
+            tt.Placement = PlacementMode.Custom;
+            tt.CustomPopupPlacementCallback = DockTipPlacement;
+            el.ToolTip = tt;
+            ToolTipService.SetInitialShowDelay(el, 300);
+            return tt;
+        }
+
+        static CustomPopupPlacement[] DockTipPlacement(Size popup, Size target, Point offset)
+        {
+            const double g = 2;      // tooltip punya margin 8 untuk bayangan: jarak tampak ~6
+            Point p = Layout.Side == 1 ? new Point(target.Width - g, (target.Height - popup.Height) / 2)
+                    : Layout.Side == 2 ? new Point(-popup.Width + g, (target.Height - popup.Height) / 2)
+                    : new Point((target.Width - popup.Width) / 2, -popup.Height + g);
+            return new CustomPopupPlacement[] { new CustomPopupPlacement(p, PopupPrimaryAxis.None) };
         }
 
         [StructLayout(LayoutKind.Sequential)] struct MPOINT { public int X, Y; }
@@ -1157,6 +1263,84 @@ namespace SlideDock
         {
             b.MouseEnter += delegate { b.Background = new SolidColorBrush(Color.FromArgb(alpha, 255, 255, 255)); };
             b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
+        }
+    }
+
+    // baterai sebagai cincin: lingkaran terisi sesuai persen, angka di tengah.
+    // Hijau saat mengisi daya, merah saat 20% ke bawah.
+    class BatteryRing : Grid
+    {
+        readonly System.Windows.Shapes.Ellipse track = new System.Windows.Shapes.Ellipse();
+        readonly System.Windows.Shapes.Path arc = new System.Windows.Shapes.Path();
+        readonly TextBlock num = new TextBlock();
+        readonly Border bolt = new Border();
+        readonly double d, th;
+        int lastPct = -1;
+        bool lastCharging;
+
+        public BatteryRing(double size)
+        {
+            d = size;
+            th = Math.Max(2, Math.Round(size * 0.11 * 2) / 2);
+            Width = d;
+            Height = d;
+            track.Stroke = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            track.StrokeThickness = th;
+            arc.StrokeThickness = th;
+            arc.StrokeStartLineCap = PenLineCap.Round;
+            arc.StrokeEndLineCap = PenLineCap.Round;
+            num.Foreground = Brushes.White;
+            num.FontFamily = UI.Text;
+            num.FontWeight = FontWeights.SemiBold;
+            num.HorizontalAlignment = HorizontalAlignment.Center;
+            num.VerticalAlignment = VerticalAlignment.Center;
+            num.TextAlignment = TextAlignment.Center;
+            num.Margin = new Thickness(0, 0, 0, size * 0.03);
+            // penanda mengisi daya: lencana petir hijau di pojok kanan bawah cincin
+            double bs = Math.Max(10, Math.Min(18, Math.Round(size * 0.46)));
+            bolt.Width = bs;
+            bolt.Height = bs;
+            bolt.CornerRadius = new CornerRadius(bs / 2);
+            bolt.Background = new SolidColorBrush(Green);
+            bolt.BorderBrush = new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x20));
+            bolt.BorderThickness = new Thickness(Math.Max(1, size * 0.05));
+            bolt.HorizontalAlignment = HorizontalAlignment.Right;
+            bolt.VerticalAlignment = VerticalAlignment.Bottom;
+            bolt.Margin = new Thickness(0, 0, -bs * 0.32, -bs * 0.22);
+            TextBlock bg = UI.Glyph("", bs * 0.62);
+            bg.Foreground = new SolidColorBrush(Color.FromRgb(0x10, 0x30, 0x14));
+            bolt.Child = bg;
+            bolt.Visibility = Visibility.Collapsed;
+            Children.Add(track);
+            Children.Add(arc);
+            Children.Add(num);
+            Children.Add(bolt);
+            Set(100, false);
+        }
+
+        public static readonly Color Green = Color.FromRgb(0x5E, 0xD0, 0x6C);
+        public static readonly Color Red = Color.FromRgb(0xFF, 0x60, 0x5C);
+
+        public void Set(int pct, bool charging)
+        {
+            pct = Math.Max(0, Math.Min(100, pct));
+            if (pct == lastPct && charging == lastCharging) return;
+            lastPct = pct;
+            lastCharging = charging;
+            num.Text = pct.ToString();
+            bolt.Visibility = charging ? Visibility.Visible : Visibility.Collapsed;
+            num.FontSize = d * (pct >= 100 ? 0.33 : 0.4);
+            arc.Stroke = new SolidColorBrush(charging ? Green : pct <= 20 ? Red : Colors.White);
+            double r = (d - th) / 2, c = d / 2;
+            if (pct >= 100) { arc.Data = new EllipseGeometry(new Point(c, c), r, r); return; }
+            if (pct <= 0) { arc.Data = null; return; }
+            double a = 2 * Math.PI * pct / 100.0;
+            PathFigure f = new PathFigure();
+            f.StartPoint = new Point(c, c - r);
+            f.Segments.Add(new ArcSegment(new Point(c + r * Math.Sin(a), c - r * Math.Cos(a)), new Size(r, r), 0, pct > 50, SweepDirection.Clockwise, true));
+            PathGeometry g = new PathGeometry();
+            g.Figures.Add(f);
+            arc.Data = g;
         }
     }
 
@@ -1237,13 +1421,28 @@ namespace SlideDock
                     ApplySurface(false);
                     return;
                 }
-                Top = anchorBottom - ActualHeight;
-                if (anchorRight > 0) Left = Math.Max(0, anchorRight - ActualWidth);
-                if (anchorCenter > 0) Left = Math.Max(0, anchorCenter - ActualWidth / 2);
-                curPos = new Point(Left, Top);
-                UpdateLayout();
-                ApplySurface(false);
+                PlaceAnchored();
             };
+        }
+
+        void PlaceAnchored()
+        {
+            Top = anchorBottom - ActualHeight;
+            if (anchorRight > 0) Left = Math.Max(0, anchorRight - ActualWidth);
+            if (anchorCenter > 0) Left = Math.Max(Scr.Left + 8, Math.Min(anchorCenter - ActualWidth / 2, Scr.Right - 8 - ActualWidth));
+            curPos = new Point(Left, Top);
+            UpdateLayout();
+            ApplySurface(false);
+        }
+
+        // popup yang sedang terbuka pindah ke tengah titik lain (mis. ikon dock lain yang diklik)
+        protected void Reanchor(double centerX)
+        {
+            if (!IsOpen || anchorCenter < 0 || Layout.V) return;
+            BeginAnimation(Window.TopProperty, null);
+            ++glideGen;
+            anchorCenter = centerX;
+            PlaceAnchored();
         }
 
         [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
@@ -1273,15 +1472,8 @@ namespace SlideDock
                 if (c0 == null) return;
                 cards = new List<Border> { c0 };
             }
-            if (UI.Theme != "glass")
-            {
-                foreach (Border c in cards)
-                {
-                    c.Background = new SolidColorBrush(Color.FromArgb(0xF8, 0x1B, 0x1B, 0x21));
-                    c.BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
-                }
-                return;
-            }
+            bool dark = UI.Theme == "dark";
+            bool aurora = UI.Theme == "aurora";
             try
             {
                 PresentationSource ps = PresentationSource.FromVisual(this);
@@ -1302,6 +1494,16 @@ namespace SlideDock
                     capImg = Frost(x0, y0, x1 - x0, y1 - y0);
                     capX = x0; capY = y0; capW = x1 - x0; capH = y1 - y0;
                 }
+                // latar tetap ditangkap di tema Dark: bila tema diganti saat popup terbuka, kaca langsung siap
+                if (dark)
+                {
+                    foreach (Border c in cards)
+                    {
+                        c.Background = new SolidColorBrush(Color.FromArgb(0xF8, 0x1B, 0x1B, 0x21));
+                        c.BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+                    }
+                    return;
+                }
                 foreach (Border card in cards)
                 {
                     Point tl = card.PointToScreen(new Point(0, 0));
@@ -1314,20 +1516,37 @@ namespace SlideDock
                     Rect unit = new Rect(0, 0, 1, 1);
                     DrawingGroup dg = new DrawingGroup();
                     dg.Children.Add(new GeometryDrawing(ib, null, new RectangleGeometry(unit)));
-                    dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb(0x6E, 0x14, 0x14, 0x1C)), null, new RectangleGeometry(unit)));
+                    dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb((byte)(aurora ? 0x5A : 0x6E), 0x14, 0x14, 0x1C)), null, new RectangleGeometry(unit)));
+                    if (aurora) dg.Children.Add(new GeometryDrawing(UI.AuroraTint(0x58), null, new RectangleGeometry(unit)));
+                    // aksen putih tipis: kabut putih merata + kilau dari atas yang turun pelan
+                    dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb(0x10, 255, 255, 255)), null, new RectangleGeometry(unit)));
                     LinearGradientBrush gl = new LinearGradientBrush();
                     gl.StartPoint = new Point(0, 0);
                     gl.EndPoint = new Point(0, 1);
-                    gl.GradientStops.Add(new GradientStop(Color.FromArgb(0x24, 255, 255, 255), 0));
-                    gl.GradientStops.Add(new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.5));
+                    gl.GradientStops.Add(new GradientStop(Color.FromArgb(0x30, 255, 255, 255), 0));
+                    gl.GradientStops.Add(new GradientStop(Color.FromArgb(0x0C, 255, 255, 255), 0.35));
+                    gl.GradientStops.Add(new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.7));
                     dg.Children.Add(new GeometryDrawing(gl, null, new RectangleGeometry(unit)));
                     DrawingBrush db = new DrawingBrush(dg);
                     db.Stretch = Stretch.Fill;
                     card.Background = db;
-                    card.BorderBrush = new SolidColorBrush(Color.FromArgb(0x70, 255, 255, 255));
+                    // tepi lebih terang di atas (seperti cahaya mengenai kaca), memudar ke bawah
+                    LinearGradientBrush edge = new LinearGradientBrush();
+                    edge.StartPoint = new Point(0, 0);
+                    edge.EndPoint = new Point(0, 1);
+                    edge.GradientStops.Add(new GradientStop(Color.FromArgb(0xA8, 255, 255, 255), 0));
+                    edge.GradientStops.Add(new GradientStop(Color.FromArgb(0x58, 255, 255, 255), 0.4));
+                    edge.GradientStops.Add(new GradientStop(Color.FromArgb(0x48, 255, 255, 255), 1));
+                    card.BorderBrush = aurora ? UI.AuroraEdge(0xC8) : edge;
                 }
             }
             catch { }
+        }
+
+        // tema diganti saat popup terbuka: gambar ulang permukaannya
+        public void RefreshSurface()
+        {
+            if (IsOpen) ApplySurface(false);
         }
         public static BitmapSource Frost(int x, int y, int w, int h)
         {
@@ -1778,13 +1997,37 @@ namespace SlideDock
         readonly Border track = new Border();
         readonly Border fill = new Border();
         readonly Border thumb = new Border();
+        readonly bool vertical;
 
-        public FlatSlider()
+        public FlatSlider() : this(false) { }
+
+        // vertical = slider tegak berbentuk pil (terisi dari bawah), untuk popup di samping dock kiri/kanan
+        public FlatSlider(bool vertical)
         {
-            Height = 26;
+            this.vertical = vertical;
             Background = Brushes.Transparent;
             Cursor = Cursors.Hand;
             Brush accent = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
+            if (vertical)
+            {
+                Width = 46;
+                track.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+                fill.Background = accent;
+                fill.VerticalAlignment = VerticalAlignment.Bottom;
+                track.Child = fill;
+                Children.Add(track);
+                SizeChanged += delegate { Layout(); };
+                MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { CaptureMouse(); FromMouse(e); };
+                MouseMove += delegate(object s, MouseEventArgs e) { if (IsMouseCaptured) FromMouse(e); };
+                MouseLeftButtonUp += delegate
+                {
+                    if (!IsMouseCaptured) return;
+                    ReleaseMouseCapture();
+                    if (Committed != null) Committed(val);
+                };
+                return;
+            }
+            Height = 26;
             track.Height = 4;
             track.CornerRadius = new CornerRadius(2);
             track.Background = new SolidColorBrush(Color.FromArgb(0x50, 255, 255, 255));
@@ -1826,6 +2069,13 @@ namespace SlideDock
 
         void FromMouse(MouseEventArgs e)
         {
+            if (vertical)
+            {
+                if (ActualHeight <= 0) return;
+                Value = 1 - e.GetPosition(this).Y / ActualHeight;
+                if (Changed != null) Changed(val);
+                return;
+            }
             double w = ActualWidth - 16;
             if (w <= 0) return;
             Value = (e.GetPosition(this).X - 8) / w;
@@ -1834,6 +2084,12 @@ namespace SlideDock
 
         void Layout()
         {
+            if (vertical)
+            {
+                track.Clip = new RectangleGeometry(new Rect(0, 0, ActualWidth, ActualHeight), 14, 14);
+                fill.Height = ActualHeight * val;
+                return;
+            }
             double w = Math.Max(0, ActualWidth - 16);
             fill.Width = w * val;
             thumb.Margin = new Thickness(w * val, 0, 0, 0);
@@ -2264,6 +2520,17 @@ namespace SlideDock
     }
 
     // ----- Start: app pilihan Anda (70%) + info & daya (30%) -----
+    // satu baris di Dock settings: pilihan (Choices), saklar (Toggle) atau tautan (Click)
+    class DockSetting
+    {
+        public string Section, Label;
+        public string[] Choices;
+        public bool Toggle;
+        public Func<int> Get;
+        public Action<int> Set;
+        public Action Click;
+    }
+
     class StartWindow : Popover
     {
         static readonly CultureInfo Id = new CultureInfo("en-US");
@@ -2283,6 +2550,17 @@ namespace SlideDock
         bool addMode;
         readonly WrapPanel trayWrap = new WrapPanel();
         public Action OnTrayFull;
+
+        // Dock settings: menggantikan daftar app (kiri) & tombol daya (kanan bawah) sampai "Done" diklik.
+        // Tiap pilihan langsung berlaku.
+        public Func<List<DockSetting>> SettingsProvider;
+        bool settingsMode;
+        Grid headRow;
+        readonly ScrollViewer settingsScroll = new ScrollViewer();
+        readonly StackPanel settingsList = new StackPanel();
+        UniformGrid powerGrid;
+        readonly Border doneBtn = new Border();
+        Border dockSettingsRow;
 
         public StartWindow()
         {
@@ -2304,6 +2582,7 @@ namespace SlideDock
             left.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
             Grid head = new Grid();
+            headRow = head;
             head.Margin = new Thickness(6, 0, 0, 8);
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -2357,6 +2636,12 @@ namespace SlideDock
             sv.ScrollChanged += delegate(object s, ScrollChangedEventArgs e) { if (e.ViewportWidthChange != 0) FitTiles(); };
             Grid.SetRow(sv, 2);
             left.Children.Add(sv);
+            settingsScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            settingsScroll.Content = settingsList;
+            settingsList.Margin = new Thickness(6, 0, 14, 8);
+            settingsScroll.Visibility = Visibility.Collapsed;
+            Grid.SetRowSpan(settingsScroll, 3);
+            left.Children.Add(settingsScroll);
             root.Children.Add(left);
 
             // ---- kanan: info & daya ----
@@ -2388,6 +2673,25 @@ namespace SlideDock
             shutdownBtn = (StackPanel)PowerButton("", "Shut down", Power.Shutdown);
             pg.Children.Add(shutdownBtn);
             power.Children.Add(pg);
+            powerGrid = pg;
+            doneBtn.CornerRadius = new CornerRadius(12);
+            doneBtn.Height = 40;
+            doneBtn.Cursor = Cursors.Hand;
+            doneBtn.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
+            doneBtn.MouseEnter += delegate { doneBtn.Background = new SolidColorBrush(Color.FromRgb(0x7D, 0xD8, 0xFF)); };
+            doneBtn.MouseLeave += delegate { doneBtn.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)); };
+            TextBlock dt = new TextBlock();
+            dt.Text = "Done";
+            dt.FontSize = 13.5;
+            dt.FontWeight = FontWeights.SemiBold;
+            dt.FontFamily = UI.Text;
+            dt.Foreground = Brushes.Black;
+            dt.HorizontalAlignment = HorizontalAlignment.Center;
+            dt.VerticalAlignment = VerticalAlignment.Center;
+            doneBtn.Child = dt;
+            doneBtn.Visibility = Visibility.Collapsed;
+            doneBtn.MouseLeftButtonUp += delegate { SetSettingsMode(false); };
+            power.Children.Add(doneBtn);
             rp.Children.Add(power);
 
             StackPanel info = new StackPanel();
@@ -2436,7 +2740,7 @@ namespace SlideDock
             sr.Orientation = Orientation.Horizontal;
             sr.Children.Add(UI.Glyph("", 14));
             TextBlock st = new TextBlock();
-            st.Text = "Settings";
+            st.Text = "PC settings";
             st.Foreground = Brushes.White;
             st.FontSize = 13;
             st.FontFamily = UI.Text;
@@ -2445,6 +2749,28 @@ namespace SlideDock
             settings.Child = sr;
             settings.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open("ms-settings:"); };
             info.Children.Add(settings);
+
+            dockSettingsRow = new Border();
+            dockSettingsRow.CornerRadius = new CornerRadius(10);
+            dockSettingsRow.Padding = new Thickness(8, 7, 8, 7);
+            dockSettingsRow.Margin = new Thickness(-8, 2, 0, 0);
+            dockSettingsRow.Background = Brushes.Transparent;
+            dockSettingsRow.Cursor = Cursors.Hand;
+            dockSettingsRow.MouseEnter += delegate { if (!settingsMode) dockSettingsRow.Background = new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)); };
+            dockSettingsRow.MouseLeave += delegate { if (!settingsMode) dockSettingsRow.Background = Brushes.Transparent; };
+            StackPanel dr = new StackPanel();
+            dr.Orientation = Orientation.Horizontal;
+            dr.Children.Add(UI.Glyph("\uE771", 14));
+            TextBlock dtx = new TextBlock();
+            dtx.Text = "Dock settings";
+            dtx.Foreground = Brushes.White;
+            dtx.FontSize = 13;
+            dtx.FontFamily = UI.Text;
+            dtx.Margin = new Thickness(10, 0, 0, 0);
+            dr.Children.Add(dtx);
+            dockSettingsRow.Child = dr;
+            dockSettingsRow.MouseLeftButtonUp += delegate { SetSettingsMode(!settingsMode); };
+            info.Children.Add(dockSettingsRow);
 
             Border taskMgr = new Border();
             taskMgr.CornerRadius = new CornerRadius(10);
@@ -2682,11 +3008,168 @@ namespace SlideDock
             });
         }
 
+        void SetSettingsMode(bool on)
+        {
+            settingsMode = on;
+            Visibility apps = on ? Visibility.Collapsed : Visibility.Visible;
+            headRow.Visibility = apps;
+            filterBox.Visibility = apps;
+            sv.Visibility = apps;
+            powerGrid.Visibility = apps;
+            settingsScroll.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            doneBtn.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            dockSettingsRow.Background = on ? new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)) : Brushes.Transparent;
+            if (on) { RenderSettings(); settingsScroll.ScrollToTop(); }
+            else if (addMode) { addMode = false; filter.Text = ""; Rebuild(); }
+        }
+
+        public void ShowSettings(double dockTop)
+        {
+            if (IsOpen) { SetSettingsMode(true); return; }
+            ShowPanel(dockTop);
+            SetSettingsMode(true);
+        }
+
+        // gambar ulang daftar pengaturan (dipanggil setelah tiap perubahan agar pilihan aktif ikut berpindah)
+        public void RenderSettings()
+        {
+            settingsList.Children.Clear();
+            TextBlock title = new TextBlock();
+            title.Text = "Dock settings";
+            title.Foreground = Brushes.White;
+            title.FontSize = 16;
+            title.FontWeight = FontWeights.SemiBold;
+            title.FontFamily = UI.Text;
+            title.Margin = new Thickness(0, 6, 0, 2);
+            settingsList.Children.Add(title);
+            TextBlock hint = new TextBlock();
+            hint.Text = "Changes apply right away.";
+            hint.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+            hint.FontSize = 12;
+            hint.FontFamily = UI.Text;
+            settingsList.Children.Add(hint);
+            if (SettingsProvider == null) return;
+            string section = null;
+            foreach (DockSetting s in SettingsProvider())
+            {
+                if (s.Section != section)
+                {
+                    section = s.Section;
+                    TextBlock h = new TextBlock();
+                    h.Text = section.ToUpperInvariant();
+                    h.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+                    h.FontSize = 11;
+                    h.FontWeight = FontWeights.SemiBold;
+                    h.FontFamily = UI.Text;
+                    h.Margin = new Thickness(0, 18, 0, 6);
+                    settingsList.Children.Add(h);
+                }
+                settingsList.Children.Add(SettingRow(s));
+            }
+        }
+
+        FrameworkElement SettingRow(DockSetting s)
+        {
+            Border row = new Border();
+            row.CornerRadius = new CornerRadius(12);
+            row.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255));
+            row.Padding = new Thickness(14, 8, 8, 8);
+            row.Margin = new Thickness(0, 0, 0, 4);
+            row.MinHeight = 46;
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock label = new TextBlock();
+            label.Text = s.Label;
+            label.Foreground = Brushes.White;
+            label.FontSize = 13;
+            label.FontFamily = UI.Text;
+            label.VerticalAlignment = VerticalAlignment.Center;
+            label.TextTrimming = TextTrimming.CharacterEllipsis;
+            g.Children.Add(label);
+            row.Child = g;
+            if (s.Click != null)
+            {
+                // tautan: seluruh baris bisa diklik
+                row.Cursor = Cursors.Hand;
+                row.MouseEnter += delegate { row.Background = new SolidColorBrush(Color.FromArgb(0x2A, 255, 255, 255)); };
+                row.MouseLeave += delegate { row.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255)); };
+                TextBlock chev = UI.Glyph("\uE76C", 11);
+                chev.Opacity = 0.7;
+                chev.Margin = new Thickness(0, 0, 6, 0);
+                Grid.SetColumn(chev, 1);
+                g.Children.Add(chev);
+                Action click = s.Click;
+                row.MouseLeftButtonUp += delegate { click(); };
+                return row;
+            }
+            int cur = s.Get != null ? s.Get() : 0;
+            FrameworkElement ctl;
+            if (s.Toggle) ctl = Switch(cur != 0, delegate { s.Set(cur != 0 ? 0 : 1); RenderSettings(); });
+            else
+            {
+                Border seg = new Border();
+                seg.CornerRadius = new CornerRadius(10);
+                seg.Background = new SolidColorBrush(Color.FromArgb(0x1E, 255, 255, 255));
+                seg.Padding = new Thickness(3);
+                StackPanel sp = new StackPanel();
+                sp.Orientation = Orientation.Horizontal;
+                for (int i = 0; i < s.Choices.Length; i++)
+                {
+                    int idx = i;
+                    bool on = idx == cur;
+                    Border b = new Border();
+                    b.CornerRadius = new CornerRadius(8);
+                    b.Padding = new Thickness(12, 5, 12, 6);
+                    b.Cursor = on ? Cursors.Arrow : Cursors.Hand;
+                    b.Background = on ? new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : Brushes.Transparent;
+                    if (!on) UI.Hover(b, 0x26);
+                    TextBlock bt = new TextBlock();
+                    bt.Text = s.Choices[i];
+                    bt.FontSize = 12.5;
+                    bt.FontFamily = UI.Text;
+                    bt.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+                    bt.Foreground = on ? Brushes.Black : Brushes.White;
+                    b.Child = bt;
+                    b.MouseLeftButtonUp += delegate { if (idx == cur) return; s.Set(idx); RenderSettings(); };
+                    sp.Children.Add(b);
+                }
+                seg.Child = sp;
+                ctl = seg;
+            }
+            ctl.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(ctl, 1);
+            g.Children.Add(ctl);
+            return row;
+        }
+
+        static FrameworkElement Switch(bool on, Action toggle)
+        {
+            Border b = new Border();
+            b.Width = 42;
+            b.Height = 22;
+            b.Margin = new Thickness(0, 0, 6, 0);
+            b.CornerRadius = new CornerRadius(11);
+            b.Cursor = Cursors.Hand;
+            b.Background = on ? new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            Border knob = new Border();
+            knob.Width = 16;
+            knob.Height = 16;
+            knob.CornerRadius = new CornerRadius(8);
+            knob.Background = on ? Brushes.Black : Brushes.White;
+            knob.Margin = new Thickness(3);
+            knob.HorizontalAlignment = on ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+            b.Child = knob;
+            b.MouseLeftButtonUp += delegate { toggle(); };
+            return b;
+        }
+
         public void ShowPanel(double dockTop)
         {
             if (IsOpen) return;
             addMode = false;
             filter.Text = "";
+            if (settingsMode) SetSettingsMode(false);
             Rebuild();
             FillInfo();
             sv.ScrollToTop();
@@ -3477,6 +3960,25 @@ namespace SlideDock
         readonly WifiPanel wifiPanel = new WifiPanel();
         readonly Border wifiArea = new Border();
 
+        // satu popup, beberapa tampilan: tiap ikon dock membuka pengaturannya sendiri,
+        // "all" = Quick Settings lengkap (dibuka dari tautan "Quick Settings" di bawah tiap tampilan)
+        public string Mode = "all";
+        readonly Border card;
+        readonly FrameworkElement allView;
+        readonly StackPanel wifiView = new StackPanel();
+        readonly StackPanel soundView = new StackPanel();
+        readonly StackPanel batteryView = new StackPanel();
+        readonly Border wifiHost = new Border();
+        FlatSlider volume2 = new FlatSlider();
+        readonly TextBlock volIcon2 = UI.Glyph("", 16);
+        readonly TextBlock volPct = new TextBlock();
+        readonly BatteryRing bigRing = new BatteryRing(56);
+        readonly TextBlock batTitle = new TextBlock();
+        readonly TextBlock batSub = new TextBlock();
+        FlatSlider bright2 = new FlatSlider();
+        FrameworkElement brightRow2;
+        Action<double> onBright, onBrightDone;
+
         void ToggleWifi()
         {
             if (wifiArea.Visibility == Visibility.Visible) { wifiArea.Visibility = Visibility.Collapsed; return; }
@@ -3486,7 +3988,7 @@ namespace SlideDock
 
         public QuickPop()
         {
-            Border card = UI.Card(20, 14);
+            card = UI.Card(20, 14);
             StackPanel sp = new StackPanel();
             sp.Margin = new Thickness(16, 16, 16, 12);
             sp.Width = 336;
@@ -3504,13 +4006,16 @@ namespace SlideDock
             brightRow = SliderRow(UI.Glyph("", 16), bright);
             brightRow.Margin = new Thickness(0, 14, 0, 0);
             sp.Children.Add(brightRow);
-            volIcon.Cursor = Cursors.Hand;
-            volIcon.ToolTip = "Mute / unmute";
-            volIcon.MouseLeftButtonUp += delegate
+            foreach (TextBlock vi in new TextBlock[] { volIcon, volIcon2 })
             {
-                SysInfo.SetMute(!SysInfo.Muted());
-                UpdateVolIcon();
-            };
+                vi.Cursor = Cursors.Hand;
+                vi.ToolTip = "Mute / unmute";
+                vi.MouseLeftButtonUp += delegate
+                {
+                    SysInfo.SetMute(!SysInfo.Muted());
+                    UpdateVolIcon();
+                };
+            }
             FrameworkElement volRow = SliderRow(volIcon, volume);
             volRow.Margin = new Thickness(0, 6, 0, 0);
             sp.Children.Add(volRow);
@@ -3557,11 +4062,14 @@ namespace SlideDock
             Grid.SetColumn(wifiArea, 1);
             two.Children.Add(wifiArea);
             wifiPanel.OnClose = delegate { HidePanel(); };
+            allView = two;
+
+            BuildWifiView();
             AnchorCenter = true;
-            card.Child = two;
+            card.Child = allView;
             Content = card;
 
-            volume.Changed = delegate(double v) { SysInfo.SetVolume(v); UpdateVolIcon(); };
+            volume.Changed = delegate(double v) { SysInfo.SetVolume(v); volume2.Value = v; UpdateVolIcon(); };
             brightTimer.Interval = TimeSpan.FromMilliseconds(120);
             brightTimer.Tick += delegate
             {
@@ -3569,8 +4077,328 @@ namespace SlideDock
                 int v = pendingBright;
                 if (v >= 0) ThreadPool.QueueUserWorkItem(delegate { SysInfo.SetBrightness(v); });
             };
-            bright.Changed = delegate(double v) { pendingBright = (int)Math.Round(v * 100); if (!brightTimer.IsEnabled) brightTimer.Start(); };
-            bright.Committed = delegate(double v) { pendingBright = (int)Math.Round(v * 100); brightTimer.Stop(); int x = pendingBright; ThreadPool.QueueUserWorkItem(delegate { SysInfo.SetBrightness(x); }); };
+            onBright = delegate(double v)
+            {
+                pendingBright = (int)Math.Round(v * 100);
+                bright.Value = v;
+                bright2.Value = v;
+                if (!brightTimer.IsEnabled) brightTimer.Start();
+            };
+            onBrightDone = delegate(double v)
+            {
+                pendingBright = (int)Math.Round(v * 100);
+                brightTimer.Stop();
+                int x = pendingBright;
+                ThreadPool.QueueUserWorkItem(delegate { SysInfo.SetBrightness(x); });
+            };
+            bright.Changed = onBright;
+            bright.Committed = onBrightDone;
+            BuildSideViews();
+        }
+
+        // ----- tampilan per ikon -----
+        static TextBlock Heading(string text)
+        {
+            TextBlock t = new TextBlock();
+            t.Text = text;
+            t.Foreground = Brushes.White;
+            t.FontSize = 15;
+            t.FontWeight = FontWeights.SemiBold;
+            t.FontFamily = UI.Text;
+            t.Margin = new Thickness(4, 0, 0, 0);
+            t.VerticalAlignment = VerticalAlignment.Center;
+            return t;
+        }
+
+        static Border LinkButton(string glyph, string text, bool chevron)
+        {
+            Border b = new Border();
+            b.CornerRadius = new CornerRadius(10);
+            b.Padding = new Thickness(8, 7, 8, 7);
+            b.Background = Brushes.Transparent;
+            b.Cursor = Cursors.Hand;
+            UI.Hover(b, 0x30);
+            StackPanel sr = new StackPanel();
+            sr.Orientation = Orientation.Horizontal;
+            if (glyph != null) sr.Children.Add(UI.Glyph(glyph, 13));
+            TextBlock t = new TextBlock();
+            t.Text = text;
+            t.Foreground = Brushes.White;
+            t.FontSize = 12.5;
+            t.FontFamily = UI.Text;
+            t.VerticalAlignment = VerticalAlignment.Center;
+            if (glyph != null) t.Margin = new Thickness(10, 0, 0, 0);
+            sr.Children.Add(t);
+            if (chevron)
+            {
+                TextBlock c = UI.Glyph("", 10);
+                c.Margin = new Thickness(8, 1, 0, 0);
+                c.Opacity = 0.75;
+                sr.Children.Add(c);
+            }
+            b.Child = sr;
+            return b;
+        }
+
+        // baris bawah tiap tampilan: [pengaturan terkait]  ...  [Quick Settings >]
+        FrameworkElement Footer(string glyph, string text, string uri, bool stacked)
+        {
+            StackPanel f = new StackPanel();
+            Border sep = new Border();
+            sep.Height = 1;
+            sep.Margin = new Thickness(0, 10, 0, 6);
+            sep.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            f.Children.Add(sep);
+            if (stacked)
+            {
+                // kolom sempit: tautan ditumpuk, isinya di tengah
+                if (text != null)
+                {
+                    Border l2 = LinkButton(glyph, text, false);
+                    ((FrameworkElement)l2.Child).HorizontalAlignment = HorizontalAlignment.Center;
+                    l2.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open(uri); };
+                    f.Children.Add(l2);
+                }
+                Border a2 = LinkButton(null, "Quick Settings", true);
+                ((FrameworkElement)a2.Child).HorizontalAlignment = HorizontalAlignment.Center;
+                a2.MouseLeftButtonUp += delegate { SwitchMode("all"); };
+                f.Children.Add(a2);
+                return f;
+            }
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            if (text != null)
+            {
+                Border left = LinkButton(glyph, text, false);
+                left.HorizontalAlignment = HorizontalAlignment.Left;
+                left.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open(uri); };
+                g.Children.Add(left);
+            }
+            Border all = LinkButton(null, "Quick Settings", true);
+            all.MouseLeftButtonUp += delegate { SwitchMode("all"); };
+            Grid.SetColumn(all, 1);
+            g.Children.Add(all);
+            f.Children.Add(g);
+            return f;
+        }
+
+        void BuildWifiView()
+        {
+            wifiView.Margin = new Thickness(16, 16, 16, 10);
+            wifiView.Children.Add(wifiHost);
+            wifiView.Children.Add(Footer(null, null, null, false));
+        }
+
+        static void Detach(FrameworkElement e)
+        {
+            Panel p = e.Parent as Panel;
+            if (p != null) { p.Children.Remove(e); return; }
+            Decorator dc = e.Parent as Decorator;
+            if (dc != null) dc.Child = null;
+        }
+
+        // dock di kiri/kanan: tampilan volume & baterai dibuat tegak (slider vertikal, isi ditumpuk)
+        bool builtV;
+
+        void BuildSideViews()
+        {
+            builtV = Layout.V;
+            BuildSoundView();
+            BuildBatteryView();
+        }
+
+        void BuildSoundView()
+        {
+            soundView.Children.Clear();
+            Detach(volIcon2);
+            Detach(volPct);
+            volume2 = new FlatSlider(Layout.V);
+            volume2.Changed = delegate(double v) { SysInfo.SetVolume(v); volume.Value = v; UpdateVolIcon(); };
+            volPct.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            volPct.FontSize = 12.5;
+            volPct.FontFamily = UI.Text;
+            volPct.VerticalAlignment = VerticalAlignment.Center;
+            soundView.Margin = new Thickness(16, 16, 16, 10);
+            if (Layout.V)
+            {
+                soundView.Width = 140;
+                TextBlock h = Heading("Volume");
+                h.Margin = new Thickness(0);
+                h.HorizontalAlignment = HorizontalAlignment.Center;
+                soundView.Children.Add(h);
+                volPct.HorizontalAlignment = HorizontalAlignment.Center;
+                volPct.Margin = new Thickness(0, 2, 0, 12);
+                soundView.Children.Add(volPct);
+                volume2.Height = 180;
+                volume2.HorizontalAlignment = HorizontalAlignment.Center;
+                soundView.Children.Add(volume2);
+                volIcon2.Margin = new Thickness(0, 12, 0, 0);
+                volIcon2.HorizontalAlignment = HorizontalAlignment.Center;
+                soundView.Children.Add(volIcon2);
+                soundView.Children.Add(Footer("", "Sound settings", "ms-settings:sound", true));
+                return;
+            }
+            soundView.Width = 300;
+            Grid head = new Grid();
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.Children.Add(Heading("Volume"));
+            volPct.HorizontalAlignment = HorizontalAlignment.Right;
+            volPct.Margin = new Thickness(0, 0, 4, 0);
+            Grid.SetColumn(volPct, 1);
+            head.Children.Add(volPct);
+            soundView.Children.Add(head);
+            volIcon2.Margin = new Thickness(0);
+            volIcon2.HorizontalAlignment = HorizontalAlignment.Center;
+            FrameworkElement row = SliderRow(volIcon2, volume2);
+            row.Margin = new Thickness(0, 12, 0, 2);
+            soundView.Children.Add(row);
+            soundView.Children.Add(Footer("", "Sound settings", "ms-settings:sound", false));
+        }
+
+        void BuildBatteryView()
+        {
+            batteryView.Children.Clear();
+            foreach (FrameworkElement e in new FrameworkElement[] { bigRing, batTitle, batSub }) Detach(e);
+            bright2 = new FlatSlider(Layout.V);
+            bright2.Changed = onBright;
+            bright2.Committed = onBrightDone;
+            batteryView.Margin = new Thickness(16, 16, 16, 10);
+            batTitle.Foreground = Brushes.White;
+            batTitle.FontSize = 20;
+            batTitle.FontWeight = FontWeights.SemiBold;
+            batTitle.FontFamily = UI.Text;
+            batSub.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            batSub.FontSize = 12;
+            batSub.FontFamily = UI.Text;
+            batSub.TextWrapping = TextWrapping.Wrap;
+            if (Layout.V)
+            {
+                batteryView.Width = 150;
+                bigRing.Margin = new Thickness(0, 4, 0, 10);
+                bigRing.HorizontalAlignment = HorizontalAlignment.Center;
+                batteryView.Children.Add(bigRing);
+                batTitle.HorizontalAlignment = HorizontalAlignment.Center;
+                batteryView.Children.Add(batTitle);
+                batSub.HorizontalAlignment = HorizontalAlignment.Center;
+                batSub.TextAlignment = TextAlignment.Center;
+                batteryView.Children.Add(batSub);
+                StackPanel br = new StackPanel();
+                br.Margin = new Thickness(0, 16, 0, 0);
+                bright2.Height = 140;
+                bright2.HorizontalAlignment = HorizontalAlignment.Center;
+                br.Children.Add(bright2);
+                TextBlock sun = UI.Glyph("", 16);
+                sun.Margin = new Thickness(0, 10, 0, 0);
+                br.Children.Add(sun);
+                brightRow2 = br;
+                batteryView.Children.Add(br);
+                StackPanel tl = new StackPanel();
+                tl.Margin = new Thickness(-3, 12, -3, 0);
+                foreach (FrameworkElement tile in new FrameworkElement[] {
+                    Tile("", "Energy saver", null, "ms-settings:batterysaver"),
+                    Tile("", "Power & battery", null, "ms-settings:powersleep") })
+                {
+                    tile.Height = 60;
+                    tl.Children.Add(tile);
+                }
+                batteryView.Children.Add(tl);
+                batteryView.Children.Add(Footer(null, null, null, true));
+                return;
+            }
+            batteryView.Width = 300;
+            Grid top = new Grid();
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            bigRing.Margin = new Thickness(4, 0, 14, 0);
+            bigRing.HorizontalAlignment = HorizontalAlignment.Left;
+            top.Children.Add(bigRing);
+            StackPanel txt = new StackPanel();
+            txt.VerticalAlignment = VerticalAlignment.Center;
+            batTitle.HorizontalAlignment = HorizontalAlignment.Left;
+            txt.Children.Add(batTitle);
+            batSub.HorizontalAlignment = HorizontalAlignment.Left;
+            batSub.TextAlignment = TextAlignment.Left;
+            txt.Children.Add(batSub);
+            Grid.SetColumn(txt, 1);
+            top.Children.Add(txt);
+            batteryView.Children.Add(top);
+            brightRow2 = SliderRow(UI.Glyph("", 16), bright2);
+            brightRow2.Margin = new Thickness(0, 14, 0, 0);
+            batteryView.Children.Add(brightRow2);
+            UniformGrid tiles = new UniformGrid();
+            tiles.Columns = 2;
+            tiles.Margin = new Thickness(-3, 10, -3, 0);
+            tiles.Children.Add(Tile("", "Energy saver", null, "ms-settings:batterysaver"));
+            tiles.Children.Add(Tile("", "Power & battery", null, "ms-settings:powersleep"));
+            batteryView.Children.Add(tiles);
+            batteryView.Children.Add(Footer(null, null, null, false));
+        }
+
+        void SwitchMode(string m)
+        {
+            Mode = m;
+            if (builtV != Layout.V) BuildSideViews();
+            wifiArea.Child = null;
+            wifiHost.Child = null;
+            if (m == "wifi") wifiHost.Child = wifiPanel;
+            else { wifiArea.Child = wifiPanel; wifiArea.Visibility = Visibility.Collapsed; }
+            card.Child = m == "wifi" ? (UIElement)wifiView : m == "sound" ? (UIElement)soundView : m == "battery" ? (UIElement)batteryView : allView;
+            LoadData();
+            if (m == "wifi") wifiPanel.Start();
+        }
+
+        void LoadData()
+        {
+            double v = SysInfo.Volume();
+            volume.Value = v < 0 ? 0 : v;
+            volume2.Value = volume.Value;
+            UpdateVolIcon();
+            batText.Text = "Battery " + SysInfo.BatteryText();
+            UpdateBattery();
+            bool wantSsid = Mode == "all";
+            bool wantBright = Mode == "all" || Mode == "battery";
+            if (wantSsid) wifiName.Text = "...";
+            if (!wantSsid && !wantBright) return;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string ssid = wantSsid ? SysInfo.Ssid() : null;
+                int b = wantBright ? SysInfo.Brightness() : -1;
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (wantSsid) wifiName.Text = ssid ?? "Not connected";
+                    if (!wantBright) return;
+                    Visibility vis = b < 0 ? Visibility.Collapsed : Visibility.Visible;
+                    brightRow.Visibility = vis;
+                    brightRow2.Visibility = vis;
+                    if (b >= 0) { bright.Value = b / 100.0; bright2.Value = b / 100.0; }
+                }));
+            });
+        }
+
+        void UpdateBattery()
+        {
+            WF.PowerStatus ps = WF.SystemInformation.PowerStatus;
+            bool has = (ps.BatteryChargeStatus & WF.BatteryChargeStatus.NoSystemBattery) == 0 && ps.BatteryLifePercent <= 1.0f;
+            if (!has)
+            {
+                bigRing.Visibility = Visibility.Collapsed;
+                batTitle.Text = "No battery";
+                batSub.Text = "Running on AC power";
+                return;
+            }
+            bigRing.Visibility = Visibility.Visible;
+            int pct = (int)Math.Round(ps.BatteryLifePercent * 100);
+            bool charging = ps.PowerLineStatus == WF.PowerLineStatus.Online;
+            bigRing.Set(pct, charging);
+            batTitle.Text = pct + "%";
+            if (charging) batSub.Text = pct >= 100 ? "Fully charged" : "Charging";
+            else
+            {
+                int s = ps.BatteryLifeRemaining;
+                batSub.Text = s > 0 ? "About " + (s >= 3600 ? s / 3600 + " h " : "") + (s % 3600) / 60 + " min left" : "On battery";
+            }
         }
 
         FrameworkElement SliderRow(FrameworkElement icon, FlatSlider s)
@@ -3628,37 +4456,35 @@ namespace SlideDock
         void UpdateVolIcon()
         {
             bool m = SysInfo.Muted();
-            volIcon.Text = m ? "" : "";
+            string g = m ? "" : "";
+            volIcon.Text = g;
+            volIcon2.Text = g;
             volume.Opacity = m ? 0.5 : 1;
+            volume2.Opacity = volume.Opacity;
+            double v = SysInfo.Volume();
+            volPct.Text = m ? "Muted" : v < 0 ? "" : Math.Round(v * 100) + "%";
         }
 
-        public void ShowAt(double right, double dockTop)
+        // mode: "wifi", "sound", "battery" atau "all"; centerX = tengah ikon dock yang diklik
+        public void ShowAt(string mode, double centerX, double dockTop)
         {
             if (IsOpen) return;
-            wifiArea.Visibility = Visibility.Collapsed;
             SysInfo.ResetAudio();
-            double v = SysInfo.Volume();
-            volume.Value = v < 0 ? 0 : v;
-            UpdateVolIcon();
-            batText.Text = "Battery " + SysInfo.BatteryText();
-            wifiName.Text = "...";
-            brightRow.Visibility = Visibility.Visible;
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                string ssid = SysInfo.Ssid();
-                int b = SysInfo.Brightness();
-                Dispatcher.BeginInvoke(new Action(delegate
-                {
-                    wifiName.Text = ssid ?? "Not connected";
-                    if (b < 0) brightRow.Visibility = Visibility.Collapsed;
-                    else bright.Value = b / 100.0;
-                }));
-            });
+            SwitchMode(mode);
             SlideIn(delegate(Size s)
             {
-                double x = Popover.Scr.Left + (Popover.Scr.Width - s.Width) / 2;
+                double x = Math.Max(Popover.Scr.Left + 8, Math.Min(centerX - s.Width / 2, Popover.Scr.Right - 8 - s.Width));
                 return new Point(x, dockTop - s.Height + 6);
             });
+        }
+
+        // sudah terbuka, ikon lain diklik: ganti isi & pindah ke atas ikon itu tanpa menutup
+        public void Switch(string mode, double centerX)
+        {
+            if (!IsOpen) return;
+            SwitchMode(mode);
+            UpdateLayout();
+            Reanchor(centerX);
         }
     }
 
@@ -4568,7 +5394,8 @@ namespace SlideDock
     // ================= dock =================
     class DockWindow : Window
     {
-        public Action OnToggle, OnDoubleClick, OnFullscreen, OnSearch, OnPower, OnQuick, OnClock, OnTray;
+        public Action OnToggle, OnDoubleClick, OnFullscreen, OnSearch, OnPower, OnClock, OnTray;
+        public Action<string> OnQuick;      // "wifi", "sound" atau "battery": ikon status mana yang diklik
         public bool HotkeyOk;
         public double SurfaceTop { get { return Top + ActualHeight - (fullCard != null && fullCard.ActualHeight > 0 ? fullCard.ActualHeight : 70); } }
         public Func<bool> AnyPopupOpen;
@@ -4579,9 +5406,8 @@ namespace SlideDock
         Border notch;
         readonly Image notchIcon = new Image();
         readonly StackPanel notchApps = new StackPanel();
-        readonly TextBlock notchBat = new TextBlock();
-        readonly TextBlock notchBatGlyph = UI.Glyph("\uE83F", 13);
-        readonly TextBlock notchCharge = UI.Glyph("\uE945", 9);
+        readonly BatteryRing notchRing = new BatteryRing(20);
+        Border notchSep;
         readonly DispatcherTimer collapseTimer = new DispatcherTimer();
         bool compact, appActive;
         string activeKey = "";
@@ -4594,10 +5420,11 @@ namespace SlideDock
         readonly Image binImage = new Image();
         readonly TextBlock netGlyph = UI.Glyph("\uE701", 15);
         readonly TextBlock volGlyph = UI.Glyph("\uE767", 15);
-        readonly TextBlock batGlyph = UI.Glyph("\uE83F", 15);
-        readonly TextBlock chargeGlyph = UI.Glyph("\uE945", 11);
-        readonly TextBlock batText = new TextBlock();
-        Border statusTile;
+        readonly BatteryRing batRing = new BatteryRing(25);
+        readonly TextBlock netTip = new TextBlock(), volTip = new TextBlock(), batTip = new TextBlock();
+        Border statusTile, netTile, volTile, batTile;
+        string netKind = "none", ssidCache;
+        bool ssidBusy;
         Border powerTile;
         Border clockTile;
         readonly uint ownPid = (uint)Process.GetCurrentProcess().Id;
@@ -4731,7 +5558,7 @@ namespace SlideDock
                 if (File.Exists(ThemeFile))
                 {
                     string s = File.ReadAllText(ThemeFile).Trim();
-                    if (s == "dark" || s == "glass") Theme = s;
+                    if (s == "dark" || s == "glass" || s == "aurora") Theme = s;
                 }
             }
             catch { }
@@ -4826,11 +5653,27 @@ namespace SlideDock
                 WrapWithShape(notch, 14, out notchShape, out notchGloss);
             }
             UI.Theme = Theme;
-            bool glass = Theme == "glass";
+            bool aurora = Theme == "aurora";
+            bool glass = Theme == "glass" || aurora;
             foreach (System.Windows.Shapes.Path p in new System.Windows.Shapes.Path[] { fullShape, notchShape })
             {
-                p.Fill = new SolidColorBrush(glass ? Color.FromArgb(0x5C, 0x14, 0x14, 0x1C) : Color.FromArgb(0xF4, 0x1B, 0x1B, 0x21));
-                p.Stroke = new SolidColorBrush(Color.FromArgb((byte)(glass ? 0x80 : 0x40), 255, 255, 255));
+                if (aurora)
+                {
+                    // lapisan gelap tipis di bawah gradasi warna agar ikon & teks tetap jelas
+                    DrawingGroup dg = new DrawingGroup();
+                    Rect unit = new Rect(0, 0, 1, 1);
+                    dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb(0x50, 0x14, 0x14, 0x1C)), null, new RectangleGeometry(unit)));
+                    dg.Children.Add(new GeometryDrawing(UI.AuroraTint(0x78), null, new RectangleGeometry(unit)));
+                    DrawingBrush db = new DrawingBrush(dg);
+                    db.Stretch = Stretch.Fill;
+                    p.Fill = db;
+                    p.Stroke = UI.AuroraEdge(0xD0);
+                }
+                else
+                {
+                    p.Fill = new SolidColorBrush(glass ? Color.FromArgb(0x5C, 0x14, 0x14, 0x1C) : Color.FromArgb(0xF4, 0x1B, 0x1B, 0x21));
+                    p.Stroke = new SolidColorBrush(Color.FromArgb((byte)(glass ? 0x80 : 0x40), 255, 255, 255));
+                }
                 p.StrokeThickness = 1;
             }
             foreach (System.Windows.Shapes.Path gl in new System.Windows.Shapes.Path[] { fullGloss, notchGloss })
@@ -4912,22 +5755,11 @@ namespace SlideDock
             dot.Height = Layout.V ? 1 : 14;
             dot.Margin = Layout.V ? new Thickness(0, 8, 0, 8) : new Thickness(10, 0, 10, 0);
             dot.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            notchSep = dot;
             sp.Children.Add(dot);
-            sp.Children.Add(notchBatGlyph);
-            notchCharge.Margin = new Thickness(2, 0, 0, 0);
-            sp.Children.Add(notchCharge);
-            notchBat.Foreground = Brushes.White;
-            notchBat.FontSize = 11.5;
-            notchBat.FontFamily = UI.Text;
-            notchBat.VerticalAlignment = VerticalAlignment.Center;
-            notchBat.Margin = Layout.V ? new Thickness(0, 2, 0, 0) : new Thickness(4, 0, 0, 0);
-            if (Layout.V)
-            {
-                notchBat.FontSize = 10;
-                notchBat.HorizontalAlignment = HorizontalAlignment.Center;
-                notchCharge.Margin = new Thickness(0, 2, 0, 0);
-            }
-            sp.Children.Add(notchBat);
+            notchRing.HorizontalAlignment = HorizontalAlignment.Center;
+            notchRing.VerticalAlignment = VerticalAlignment.Center;
+            sp.Children.Add(notchRing);
             notch.Child = sp;
         }
 
@@ -5094,7 +5926,8 @@ namespace SlideDock
                 SetCompact(false);
                 return;
             }
-            if ((DateTime.Now - lastNear).TotalMilliseconds > 700) SetCompact(true);
+            if (!Prefs.Notch) SetCompact(false);                       // notch dimatikan: dock selalu penuh
+            else if ((DateTime.Now - lastNear).TotalMilliseconds > 700) SetCompact(true);
         }
         static ImageSource IconOf(DockItem it)
         {
@@ -5106,7 +5939,7 @@ namespace SlideDock
             return src;
         }
 
-        // efek membesar seperti Dock Mac: dihitung per frame (60 fps) dengan kurva kosinus
+        // efek membesar seperti Dock Mac: dihitung per frame (60 fps)
         double magX = double.NaN;
         bool magLoop;
 
@@ -5123,6 +5956,8 @@ namespace SlideDock
         void MagStep(object sender, EventArgs e)
         {
             bool moving = false;
+            int mag = Prefs.Magnify;                                  // 0 mati, 1 halus, 2 kuat
+            double peak = mag == 0 ? 0 : mag == 1 ? 0.22 : 0.5, sigma = mag == 1 ? 44 : 38;
             foreach (UIElement c in itemsPanel.Children)
             {
                 FrameworkElement fe = c as FrameworkElement;
@@ -5130,11 +5965,12 @@ namespace SlideDock
                 ScaleTransform st = fe.Tag as ScaleTransform;
                 if (st == null) continue;
                 double target = 1;
-                if (!double.IsNaN(magX))
+                if (!double.IsNaN(magX) && peak > 0)
                 {
                     double cx = Layout.V ? fe.TranslatePoint(new Point(0, fe.ActualHeight / 2), itemsPanel).Y : fe.TranslatePoint(new Point(fe.ActualWidth / 2, 0), itemsPanel).X;
-                    double d = Math.Min(Math.Abs(magX - cx) / 130.0, 1);
-                    target = 1 + 0.42 * Math.Cos(d * Math.PI / 2);
+                    // kurva lonceng yang lebih tajam: ikon di bawah kursor ~1.5x, tetangga ~1.2x, dua ikon jauhnya hampir normal
+                    double d = Math.Abs(magX - cx);
+                    target = 1 + peak * Math.Exp(-(d * d) / (2 * sigma * sigma));
                 }
                 double cur = st.ScaleX;
                 double nv = cur + (target - cur) * 0.22;
@@ -5160,7 +5996,9 @@ namespace SlideDock
             return b;
         }
 
-        Border NewTile()
+        Border NewTile() { return NewTile(true); }
+
+        Border NewTile(bool hover)
         {
             Border t = new Border();
             t.MinWidth = 46;
@@ -5168,15 +6006,18 @@ namespace SlideDock
             t.Margin = Layout.V ? new Thickness(0, 1, 0, 1) : new Thickness(1, 0, 1, 0);
             t.CornerRadius = new CornerRadius(12);
             t.Background = Brushes.Transparent;
-            t.Cursor = Cursors.Hand;
-            UI.Hover(t, 0x30);
+            if (hover)
+            {
+                t.Cursor = Cursors.Hand;
+                UI.Hover(t, 0x30);
+            }
             return t;
         }
         Border GlyphTile(string glyph, double size, string tip, Action click)
         {
             Border t = NewTile();
             t.Child = UI.Glyph(glyph, size);
-            t.ToolTip = tip;
+            UI.Tip(t, tip);
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; click(); };
             return t;
         }
@@ -5200,7 +6041,7 @@ namespace SlideDock
                 g.Children.Add(d);
             }
             t.Child = g;
-            t.ToolTip = "Start (Windows key)  -  right-click for SlideDock options";
+            UI.Tip(t, "Start  ·  right-click for SlideDock options");
             AttachDockMenu(t);
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; if (OnToggle != null) OnToggle(); };
             return t;
@@ -5213,7 +6054,7 @@ namespace SlideDock
             binImage.Height = 30;
             RenderOptions.SetBitmapScalingMode(binImage, BitmapScalingMode.HighQuality);
             t.Child = binImage;
-            t.ToolTip = "Recycle Bin";
+            UI.Tip(t, "Recycle Bin");
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Launcher.Open("shell:RecycleBinFolder"); };
             ContextMenu cm = new ContextMenu();
             MenuItem open = new MenuItem();
@@ -5229,54 +6070,83 @@ namespace SlideDock
             return t;
         }
 
+        // Wi-Fi, volume, baterai: masing-masing punya sorot, tooltip satu nama, dan pengaturannya sendiri saat diklik
         FrameworkElement MakeStatus()
         {
-            statusTile = NewTile();
+            statusTile = NewTile(false);
             StackPanel sp = new StackPanel();
+            sp.Orientation = Layout.V ? Orientation.Vertical : Orientation.Horizontal;
             sp.VerticalAlignment = VerticalAlignment.Center;
-            batText.Foreground = Brushes.White;
-            batText.FontFamily = UI.Text;
-            batText.VerticalAlignment = VerticalAlignment.Center;
+            sp.HorizontalAlignment = HorizontalAlignment.Center;
             if (Layout.V)
             {
-                // dock tegak: Wi-Fi, volume, baterai ditumpuk ke bawah
                 statusTile.Height = double.NaN;
-                statusTile.Padding = new Thickness(0, 8, 0, 8);
-                sp.Orientation = Orientation.Vertical;
-                netGlyph.Margin = new Thickness(0, 0, 0, 7);
-                volGlyph.Margin = new Thickness(0, 0, 0, 7);
-                StackPanel bat = new StackPanel();
-                bat.Orientation = Orientation.Horizontal;
-                bat.HorizontalAlignment = HorizontalAlignment.Center;
-                chargeGlyph.Margin = new Thickness(2, 0, 0, 0);
-                bat.Children.Add(batGlyph);
-                bat.Children.Add(chargeGlyph);
-                batText.FontSize = 10.5;
-                batText.HorizontalAlignment = HorizontalAlignment.Center;
-                batText.Margin = new Thickness(0, 2, 0, 0);
-                sp.Children.Add(netGlyph);
-                sp.Children.Add(volGlyph);
-                sp.Children.Add(bat);
-                sp.Children.Add(batText);
+                statusTile.Padding = new Thickness(0, 4, 0, 4);
+            }
+            else statusTile.Padding = new Thickness(2, 0, 2, 0);
+            netGlyph.Width = 20;
+            netGlyph.TextAlignment = TextAlignment.Center;
+            volGlyph.Width = 20;
+            volGlyph.TextAlignment = TextAlignment.Center;
+            netTile = StatusPart(netGlyph, "wifi", netTip);
+            volTile = StatusPart(volGlyph, "sound", volTip);
+            batTile = StatusPart(batRing, "battery", batTip);
+            netTile.ToolTipOpening += delegate { RefreshSsid(); };
+            // scroll di ikon volume = naik/turun 2% per langkah, seperti tray Windows
+            volTile.MouseWheel += delegate(object s, MouseWheelEventArgs e)
+            {
+                e.Handled = true;
+                double v = SysInfo.Volume();
+                if (v < 0) return;
+                v = Math.Round((v + e.Delta / 120.0 * 0.02) * 50) / 50;
+                SysInfo.SetVolume(Math.Max(0, Math.Min(1, v)));
+                UpdateVolume();
+            };
+            sp.Children.Add(netTile);
+            sp.Children.Add(volTile);
+            sp.Children.Add(batTile);
+            statusTile.Child = sp;
+            // celah di antara ikon tidak membuka Start
+            statusTile.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; };
+            return statusTile;
+        }
+
+        Border StatusPart(FrameworkElement content, string mode, TextBlock tip)
+        {
+            Border b = new Border();
+            b.CornerRadius = new CornerRadius(10);
+            b.Background = Brushes.Transparent;
+            b.Cursor = Cursors.Hand;
+            if (Layout.V)
+            {
+                b.Width = 38;
+                b.MinHeight = 34;
+                b.Padding = new Thickness(0, 5, 0, 5);
+                b.Margin = new Thickness(0, 1, 0, 1);
             }
             else
             {
-                statusTile.Padding = new Thickness(8, 0, 8, 0);
-                sp.Orientation = Orientation.Horizontal;
-                netGlyph.Margin = new Thickness(0, 0, 9, 0);
-                volGlyph.Margin = new Thickness(0, 0, 9, 0);
-                batText.FontSize = 12;
-                batText.Margin = new Thickness(4, 0, 0, 0);
-                chargeGlyph.Margin = new Thickness(2, 0, 0, 0);
-                sp.Children.Add(netGlyph);
-                sp.Children.Add(volGlyph);
-                sp.Children.Add(batGlyph);
-                sp.Children.Add(chargeGlyph);
-                sp.Children.Add(batText);
+                b.Height = 38;
+                b.MinWidth = 34;
+                b.Padding = new Thickness(5, 0, 5, 0);
+                b.Margin = new Thickness(1, 0, 1, 0);
             }
-            statusTile.Child = sp;
-            statusTile.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; if (OnQuick != null) OnQuick(); };
-            return statusTile;
+            UI.Hover(b, 0x30);
+            content.HorizontalAlignment = HorizontalAlignment.Center;
+            content.VerticalAlignment = VerticalAlignment.Center;
+            b.Child = content;
+            UI.Tip(b, tip);
+            b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; if (OnQuick != null) OnQuick(mode); };
+            return b;
+        }
+
+        // tengah ikon status (koordinat layar) agar popup muncul tepat di atasnya
+        public double StatusCenter(string mode)
+        {
+            Border t = mode == "wifi" ? netTile : mode == "sound" ? volTile : mode == "battery" ? batTile : statusTile;
+            if (t == null || t.ActualWidth <= 0) t = statusTile;
+            Point p = t.TranslatePoint(new Point(t.ActualWidth / 2, 0), this);
+            return Left + p.X;
         }
         Border trayTile;
         readonly PreviewWindow preview = new PreviewWindow();
@@ -5368,7 +6238,7 @@ namespace SlideDock
             clock.Children.Add(clockTime);
             clock.Children.Add(clockDate);
             t.Child = clock;
-            t.ToolTip = "Calendar";
+            UI.Tip(t, "Calendar");
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; if (OnClock != null) OnClock(); };
             return t;
         }
@@ -5402,34 +6272,57 @@ namespace SlideDock
         void UpdateStatus()
         {
             string kind = NetKind();
-            netGlyph.Text = kind == "eth" ? "\uE839" : "\uE701";
+            if (kind != "wifi") ssidCache = null;
+            else if (netKind != "wifi") ssidCache = null;     // baru tersambung: nama jaringan dibaca ulang
+            netKind = kind;
+            netGlyph.Text = kind == "eth" ? "" : "";
             netGlyph.Opacity = kind == "none" ? 0.35 : 1;
-            string netText = kind == "wifi" ? "Wi-Fi connected" : kind == "eth" ? "Ethernet connected" : "No internet";
+            UpdateNetTip();
 
             WF.PowerStatus ps = WF.SystemInformation.PowerStatus;
             bool hasBat = (ps.BatteryChargeStatus & WF.BatteryChargeStatus.NoSystemBattery) == 0 && ps.BatteryLifePercent <= 1.0f;
-            string batTip = "";
+            Visibility bv = hasBat ? Visibility.Visible : Visibility.Collapsed;
+            batTile.Visibility = bv;
+            notchRing.Visibility = bv;
+            if (notchSep != null) notchSep.Visibility = bv;
             if (hasBat)
             {
                 int pct = (int)Math.Round(ps.BatteryLifePercent * 100);
                 bool charging = ps.PowerLineStatus == WF.PowerLineStatus.Online;
-                batGlyph.Text = pct >= 100 ? "\uE83F" : ((char)(0xE850 + Math.Max(0, Math.Min(9, pct / 10)))).ToString();
-                batText.Text = pct + "%";
-                notchBat.Text = pct + "%";
-                notchBatGlyph.Text = batGlyph.Text;
-                chargeGlyph.Visibility = charging ? Visibility.Visible : Visibility.Collapsed;
-                notchCharge.Visibility = chargeGlyph.Visibility;
-                batGlyph.Visibility = Visibility.Visible;
-                batText.Visibility = Visibility.Visible;
-                batTip = "  |  Battery " + pct + "%" + (charging ? " (charging)" : "");
+                batRing.Set(pct, charging);
+                notchRing.Set(pct, charging);
+                batTip.Text = "Battery " + pct + "%" + (charging ? (pct >= 100 ? " · fully charged" : " · charging") : "");
             }
-            else
+            UpdateVolume();
+        }
+
+        void UpdateNetTip()
+        {
+            netTip.Text = netKind == "wifi" ? "Wi-Fi" + (string.IsNullOrEmpty(ssidCache) ? "" : " · " + ssidCache)
+                        : netKind == "eth" ? "Ethernet" : "Not connected";
+        }
+
+        // nama Wi-Fi dibaca lewat netsh (lambat): di latar belakang, saat tooltip mulai tampil
+        void RefreshSsid()
+        {
+            if (ssidBusy || netKind != "wifi") return;
+            ssidBusy = true;
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                batGlyph.Visibility = Visibility.Collapsed;
-                batText.Visibility = Visibility.Collapsed;
-                chargeGlyph.Visibility = Visibility.Collapsed;
-            }
-            statusTile.ToolTip = netText + batTip + "  |  Click: Quick Settings (Wi-Fi, volume, brightness)";
+                string s = SysInfo.Ssid();
+                Dispatcher.BeginInvoke(new Action(delegate { ssidBusy = false; ssidCache = s; UpdateNetTip(); }));
+            });
+        }
+
+        // ikon volume mengikuti level & mute
+        void UpdateVolume()
+        {
+            double v = SysInfo.Volume();
+            if (v < 0) { volGlyph.Text = ""; volTip.Text = "Volume"; return; }
+            bool m = SysInfo.Muted();
+            int p = (int)Math.Round(v * 100);
+            volGlyph.Text = m ? "" : p == 0 ? "" : p < 34 ? "" : p < 67 ? "" : "";
+            volTip.Text = m ? "Muted" : "Volume " + p + "%";
         }
 
         // ----- app pin + berjalan -----
@@ -5490,7 +6383,7 @@ namespace SlideDock
                 g.Children.Add(dot);
             }
             t.Child = g;
-            t.ToolTip = it.Name;
+            UI.Tip(t, it.Name);
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Activate(it); };
 
             ContextMenu cm = new ContextMenu();
@@ -5783,6 +6676,7 @@ namespace SlideDock
             if (hiddenForFullscreen) return;
             UpdateItems();
             if (tick % 5 == 0) { UpdateBin(); UpdateStatus(); }
+            else if (!compact) UpdateVolume();
         }
 
         // ----- posisi + AppBar -----
@@ -6009,6 +6903,8 @@ namespace SlideDock
                 app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
                 UI.ApplyMenuStyle(app);
                 Layout.Load();
+                TaskbarCtl.HideEnabled = Prefs.HideTaskbar;
+                WinKeyHook.Active = Prefs.WinKey;
 
                 StartWindow start = new StartWindow();
                 SearchWindow search = new SearchWindow();
@@ -6058,7 +6954,14 @@ namespace SlideDock
                     d.OnFullscreen = hideAll;
                     d.OnPopup = delegate { };
                     d.OnSearch = delegate { use(d); if (switchTo(search)) search.ShowPanel(d.SurfaceTop); };
-                    d.OnQuick = delegate { use(d); if (switchTo(quick)) quick.ShowAt(d.ClockRight(), d.SurfaceTop); };
+                    d.OnQuick = delegate(string mode)
+                    {
+                        use(d);
+                        double cx = d.StatusCenter(mode);
+                        // popup sudah terbuka untuk ikon lain: ganti isinya di tempat; ikon yang sama = tutup
+                        if (quick.IsOpen && quick.Mode != mode) { foreach (DockWindow x in docks) x.HidePreview(); quick.Switch(mode, cx); return; }
+                        if (switchTo(quick)) quick.ShowAt(mode, cx, d.SurfaceTop);
+                    };
                     d.OnClock = delegate { use(d); if (switchTo(cal)) cal.ShowAt(d.ClockRight(), d.SurfaceTop); };
                     d.OnTray = delegate { use(d); if (switchTo(trayPop)) trayPop.ShowAt(d.TrayLeft(), d.SurfaceTop); };
                     d.AnyPopupOpen = delegate { if (cur != d) return false; foreach (Popover p in pops) if (p.IsOpen) return true; return false; };
@@ -6113,25 +7016,37 @@ namespace SlideDock
                 menu.Font = new DR.Font("Segoe UI", 9.5f);
                 menu.Items.Add("Open Start", null, delegate { use(dock); toggle(); });
                 WF.ToolStripMenuItem hideTb = new WF.ToolStripMenuItem("Hide Windows taskbar");
-                hideTb.Checked = true;
-                hideTb.Click += delegate
+                hideTb.Checked = TaskbarCtl.HideEnabled;
+                Action<bool> setHideTb = delegate(bool on)
                 {
-                    hideTb.Checked = !hideTb.Checked;
-                    TaskbarCtl.HideEnabled = hideTb.Checked;
-                    if (hideTb.Checked) TaskbarCtl.Apply(); else TaskbarCtl.ShowAll();
+                    hideTb.Checked = on;
+                    TaskbarCtl.HideEnabled = on;
+                    Prefs.HideTaskbar = on;
+                    if (on) TaskbarCtl.Apply(); else TaskbarCtl.ShowAll();
                 };
+                hideTb.Click += delegate { setHideTb(!hideTb.Checked); };
                 menu.Items.Add(hideTb);
                 WF.ToolStripMenuItem winKey = new WF.ToolStripMenuItem("Windows key opens dock");
-                winKey.Checked = true;
-                winKey.Click += delegate { winKey.Checked = !winKey.Checked; WinKeyHook.Active = winKey.Checked; };
+                winKey.Checked = WinKeyHook.Active;
+                Action<bool> setWinKey = delegate(bool on) { winKey.Checked = on; WinKeyHook.Active = on; Prefs.WinKey = on; };
+                winKey.Click += delegate { setWinKey(!winKey.Checked); };
                 menu.Items.Add(winKey);
                 WF.ToolStripMenuItem themeGlass = new WF.ToolStripMenuItem("Theme: Glass");
                 WF.ToolStripMenuItem themeDark = new WF.ToolStripMenuItem("Theme: Dark");
-                Action syncTheme = delegate { themeGlass.Checked = dock.Theme == "glass"; themeDark.Checked = dock.Theme == "dark"; };
-                themeGlass.Click += delegate { foreach (DockWindow d in docks) d.ApplyTheme("glass"); syncTheme(); };
-                themeDark.Click += delegate { foreach (DockWindow d in docks) d.ApplyTheme("dark"); syncTheme(); };
+                WF.ToolStripMenuItem themeAurora = new WF.ToolStripMenuItem("Theme: Aurora");
+                Action syncTheme = delegate { themeGlass.Checked = dock.Theme == "glass"; themeDark.Checked = dock.Theme == "dark"; themeAurora.Checked = dock.Theme == "aurora"; };
+                Action<string> setTheme = delegate(string th)
+                {
+                    foreach (DockWindow d in docks) d.ApplyTheme(th);
+                    syncTheme();
+                    foreach (Popover pp in pops) pp.RefreshSurface();
+                };
+                themeGlass.Click += delegate { setTheme("glass"); };
+                themeDark.Click += delegate { setTheme("dark"); };
+                themeAurora.Click += delegate { setTheme("aurora"); };
                 menu.Items.Add(themeGlass);
                 menu.Items.Add(themeDark);
+                menu.Items.Add(themeAurora);
                 string[] posNames = new string[] { "Bottom", "Left", "Right" };
                 for (int pi = 0; pi < 3; pi++)
                 {
@@ -6164,11 +7079,13 @@ namespace SlideDock
                 {
                     Func<bool, string> ck = delegate(bool on) { return on ? "\u2713   " : "      "; };
                     List<KeyValuePair<string, Action>> l = new List<KeyValuePair<string, Action>>();
+                    l.Add(new KeyValuePair<string, Action>("Dock settings", delegate { use(dockAtCursor()); foreach (Popover pp in pops) if (pp != start) pp.HidePanel(); start.ShowSettings(cur.SurfaceTop); }));
                     l.Add(new KeyValuePair<string, Action>("Task Manager", delegate { Launcher.Open("taskmgr.exe"); }));
                     l.Add(new KeyValuePair<string, Action>("Windows Settings", delegate { Launcher.Open("ms-settings:"); }));
                     l.Add(new KeyValuePair<string, Action>(null, null));
-                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "glass") + "Theme: Glass", delegate { foreach (DockWindow d in docks) d.ApplyTheme("glass"); syncTheme(); }));
-                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "dark") + "Theme: Dark", delegate { foreach (DockWindow d in docks) d.ApplyTheme("dark"); syncTheme(); }));
+                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "glass") + "Theme: Glass", delegate { setTheme("glass"); }));
+                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "dark") + "Theme: Dark", delegate { setTheme("dark"); }));
+                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "aurora") + "Theme: Aurora", delegate { setTheme("aurora"); }));
                     l.Add(new KeyValuePair<string, Action>(null, null));
                     string[] pn = new string[] { "Bottom", "Left", "Right" };
                     for (int i = 0; i < 3; i++)
@@ -6177,7 +7094,7 @@ namespace SlideDock
                         l.Add(new KeyValuePair<string, Action>(ck(Layout.Side == idx) + "Position: " + pn[i], delegate { if (Layout.Side == idx) return; changeSide(idx); }));
                     }
                     l.Add(new KeyValuePair<string, Action>(null, null));
-                    l.Add(new KeyValuePair<string, Action>(ck(WinKeyHook.Active) + "Windows key opens dock", delegate { WinKeyHook.Active = !WinKeyHook.Active; winKey.Checked = WinKeyHook.Active; }));
+                    l.Add(new KeyValuePair<string, Action>(ck(WinKeyHook.Active) + "Windows key opens dock", delegate { setWinKey(!WinKeyHook.Active); }));
                     l.Add(new KeyValuePair<string, Action>(ck(AutoStartOn()) + "Start with Windows", delegate { SetAutoStart(!AutoStartOn()); auto.Checked = AutoStartOn(); }));
                     l.Add(new KeyValuePair<string, Action>("Open settings folder", delegate { Process.Start("explorer.exe", Store.Dir); }));
                     l.Add(new KeyValuePair<string, Action>(null, null));
@@ -6185,6 +7102,47 @@ namespace SlideDock
                     return l;
                 };
                 foreach (DockWindow d in docks) d.MenuProvider = dockMenu;
+
+                // Dock settings di Start: tiap pilihan langsung berlaku
+                string[] themeKeys = new string[] { "glass", "dark", "aurora" };
+                start.SettingsProvider = delegate
+                {
+                    List<DockSetting> l = new List<DockSetting>();
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Theme", Choices = new string[] { "Glass", "Dark", "Aurora" },
+                        Get = delegate { return Math.Max(0, Array.IndexOf(themeKeys, dock.Theme)); },
+                        Set = delegate(int i) { setTheme(themeKeys[i]); } });
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Position", Choices = new string[] { "Bottom", "Left", "Right" },
+                        Get = delegate { return Layout.Side; },
+                        Set = delegate(int i)
+                        {
+                            if (Layout.Side == i) return;
+                            changeSide(i);
+                            // dock dibuat ulang (semua popup tertutup): buka lagi Dock settings di dock yang baru
+                            DispatcherTimer reopen = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                            reopen.Tick += delegate { reopen.Stop(); use(dock); start.ShowSettings(dock.SurfaceTop); };
+                            reopen.Start();
+                        } });
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Magnify on hover", Choices = new string[] { "Off", "Subtle", "Strong" },
+                        Get = delegate { return Prefs.Magnify; },
+                        Set = delegate(int i) { Prefs.Magnify = i; } });
+                    l.Add(new DockSetting { Section = "Behavior", Label = "Shrink to notch when idle", Toggle = true,
+                        Get = delegate { return Prefs.Notch ? 1 : 0; },
+                        Set = delegate(int i) { Prefs.Notch = i != 0; } });
+                    l.Add(new DockSetting { Section = "Behavior", Label = "Windows key opens Start", Toggle = true,
+                        Get = delegate { return WinKeyHook.Active ? 1 : 0; },
+                        Set = delegate(int i) { setWinKey(i != 0); } });
+                    l.Add(new DockSetting { Section = "Behavior", Label = "Hide Windows taskbar", Toggle = true,
+                        Get = delegate { return TaskbarCtl.HideEnabled ? 1 : 0; },
+                        Set = delegate(int i) { setHideTb(i != 0); } });
+                    l.Add(new DockSetting { Section = "Behavior", Label = "Start with Windows", Toggle = true,
+                        Get = delegate { return AutoStartOn() ? 1 : 0; },
+                        Set = delegate(int i) { SetAutoStart(i != 0); auto.Checked = AutoStartOn(); } });
+                    l.Add(new DockSetting { Section = "More", Label = "Open settings folder",
+                        Click = delegate { start.HidePanel(); Process.Start("explorer.exe", Store.Dir); } });
+                    l.Add(new DockSetting { Section = "More", Label = "Exit SlideDock (restore taskbar)",
+                        Click = delegate { exitApp(); } });
+                    return l;
+                };
 
                 // ganti posisi dock tanpa memulai ulang app: dock baru dibuat & tampil dulu, baru dock lama ditutup
                 // bangun ulang dock untuk semua layar saat ini (dipakai saat ganti posisi & saat jumlah layar berubah)

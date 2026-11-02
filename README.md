@@ -8,9 +8,11 @@ A modern dock that replaces the Windows 10/11 taskbar. Single C# file, built wit
 - **Notch mode**: shrinks to a small pill when idle, expands when the mouse comes near
 - **Start**: your chosen apps (drag to reorder), clock, Wi‑Fi/battery/disk info, background (tray) apps, Settings, Task Manager, power buttons (update-aware Restart/Shut down)
 - **Search** for apps, files and the web
+- **Status icons**: Wi‑Fi, volume and a battery ring (green with a bolt while charging); each icon opens its own panel (Wi‑Fi list, volume, battery), scroll on the volume icon to change volume
 - **Quick Settings**: brightness, volume, Wi‑Fi list and connect
 - **Calendar + notifications** (dismiss one or clear all)
-- **Themes**: Glass (frosted blur) or Dark
+- **Themes**: Glass (frosted blur), Dark, or Aurora (frosted glass with a purple-to-teal glow)
+- **Dock settings** in Start: theme, position, magnify strength, notch, Windows key, taskbar, start with Windows. Changes apply right away
 - **Position**: bottom, left or right; one dock per monitor, per‑monitor DPI
 - **Windows key** opens Start (disabled automatically in fullscreen games and presentations)
 
@@ -42,7 +44,7 @@ Double-click `SlideDock.exe`. The Windows taskbar is hidden while SlideDock runs
 
 ## Settings
 
-Stored per user in `%APPDATA%\SlideDock` (pinned apps, Start apps, theme, position). Delete that folder to reset.
+Stored per user in `%APPDATA%\SlideDock` (pinned apps, Start apps, theme, position, `prefs.txt` for the other dock settings). Delete that folder to reset.
 
 ## Notes
 
