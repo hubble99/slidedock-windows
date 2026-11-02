@@ -5,3 +5,7 @@
 # local backups and logs
 *.bak
 *.log
+
+# generated build files
+obj/
+dist/

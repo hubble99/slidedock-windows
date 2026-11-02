@@ -1,0 +1,54 @@
+name: Build and release
+
+# Every push to main builds SlideDock. When the VERSION file holds a version that has no release yet,
+# the build is published as a GitHub release (tag v<VERSION>). Installed copies of SlideDock check the
+# latest release and offer the update. To ship a new version: bump VERSION, push.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and package
+        shell: powershell
+        env:
+          # optional repository variables (Settings > Secrets and variables > Actions > Variables),
+          # copied from Partner Center > Product identity, for the Microsoft Store package
+          STORE_IDENTITY_NAME: ${{ vars.STORE_IDENTITY_NAME }}
+          STORE_PUBLISHER: ${{ vars.STORE_PUBLISHER }}
+          STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.STORE_PUBLISHER_DISPLAY_NAME }}
+        run: powershell -ExecutionPolicy Bypass -File packaging\pack.ps1
+
+      - name: Keep the build (includes the Microsoft Store .msix)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SlideDock-${{ github.sha }}
+          path: dist/*
+
+      - name: Publish release when VERSION is new
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          v=$(tr -d '[:space:]' < VERSION)
+          if gh release view "v$v" > /dev/null 2>&1; then
+            echo "Release v$v already exists. Bump VERSION to publish a new release."
+            exit 0
+          fi
+          gh release create "v$v" \
+            dist/SlideDock.exe dist/SlideDock.exe.sha256 "dist/SlideDock-$v-win-x64.zip" \
+            --target "$GITHUB_SHA" --title "SlideDock $v" --generate-notes

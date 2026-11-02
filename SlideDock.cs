@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -86,6 +87,194 @@ namespace SlideDock
         }
     }
 
+    // ----- identitas app: versi (dari file VERSION saat build) & mode Microsoft Store -----
+    static class AppInfo
+    {
+        public const string Repo = "hubble99/slidedock-windows";
+        public static readonly Version Ver = Norm(typeof(AppInfo).Assembly.GetName().Version);
+        public static string Version { get { return Ver.ToString(3); } }
+        public static string ReleasesPage { get { return "https://github.com/" + Repo + "/releases"; } }
+
+        public static Version Norm(Version v) { return new Version(v.Major, Math.Max(0, v.Minor), Math.Max(0, v.Build)); }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern int GetCurrentPackageFullName(ref int len, StringBuilder name);
+        static bool? packaged;
+
+        // dipasang dari Microsoft Store (MSIX): update diurus Store, mulai bersama Windows lewat StartupTask
+        public static bool Packaged
+        {
+            get
+            {
+                if (packaged == null)
+                {
+                    try { int len = 0; packaged = GetCurrentPackageFullName(ref len, null) != 15700; }   // 15700 = bukan paket
+                    catch { packaged = false; }
+                }
+                return packaged.Value;
+            }
+        }
+    }
+
+    // ----- update otomatis dari GitHub Releases (versi biasa, bukan versi Store) -----
+    class UpdateInfo { public Version Ver; public string Tag, Page, ExeUrl, ShaUrl; }
+
+    static class Updater
+    {
+        public static UpdateInfo Available;              // null = sudah versi terbaru / belum dicek
+        public static bool Busy, Checking;
+        public static DateTime LastCheck = DateTime.MinValue;
+        public static string LastError;
+        public static Action Changed;                    // dipanggil di thread UI setiap status berubah
+        public static bool AutoCheck { get { return Prefs.Get("autoupdate", 1) != 0; } set { Prefs.Set("autoupdate", value ? 1 : 0); } }
+        public static bool Enabled { get { return !AppInfo.Packaged; } }
+
+        static WebClient Client()
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            WebClient wc = new WebClient();
+            wc.Headers[HttpRequestHeader.UserAgent] = "SlideDock/" + AppInfo.Version;
+            return wc;
+        }
+
+        static UpdateInfo Fetch()
+        {
+            string json;
+            using (WebClient wc = Client())
+            {
+                wc.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+                wc.Encoding = Encoding.UTF8;
+                json = wc.DownloadString("https://api.github.com/repos/" + AppInfo.Repo + "/releases/latest");
+            }
+            System.Web.Script.Serialization.JavaScriptSerializer js = new System.Web.Script.Serialization.JavaScriptSerializer();
+            js.MaxJsonLength = 20000000;
+            Dictionary<string, object> d = js.Deserialize<Dictionary<string, object>>(json);
+            string tag = d.ContainsKey("tag_name") ? d["tag_name"] as string : null;
+            Version v;
+            if (tag == null || !System.Version.TryParse(tag.TrimStart('v', 'V'), out v)) return null;
+            UpdateInfo u = new UpdateInfo();
+            u.Ver = AppInfo.Norm(v);
+            u.Tag = tag;
+            u.Page = d.ContainsKey("html_url") ? d["html_url"] as string : AppInfo.ReleasesPage;
+            System.Collections.IEnumerable assets = d.ContainsKey("assets") ? d["assets"] as System.Collections.IEnumerable : null;
+            if (assets != null)
+                foreach (object o in assets)
+                {
+                    Dictionary<string, object> a = o as Dictionary<string, object>;
+                    if (a == null) continue;
+                    string name = a["name"] as string, url = a["browser_download_url"] as string;
+                    if (name == "SlideDock.exe") u.ExeUrl = url;
+                    else if (name == "SlideDock.exe.sha256") u.ShaUrl = url;
+                }
+            return u;
+        }
+
+        // cek rilis terbaru di thread latar; done(pesan) di thread UI (pesan null = berhasil)
+        public static void Check(Dispatcher ui, Action<string> done)
+        {
+            if (!Enabled || Checking) return;
+            Checking = true;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                UpdateInfo u = null;
+                string err = null;
+                try { u = Fetch(); } catch (Exception ex) { err = ex.Message; }
+                ui.BeginInvoke(new Action(delegate
+                {
+                    Checking = false;
+                    LastCheck = DateTime.Now;
+                    LastError = err;
+                    if (err == null) Available = u != null && u.ExeUrl != null && u.Ver > AppInfo.Ver ? u : null;
+                    if (Changed != null) Changed();
+                    if (done != null) done(err);
+                }));
+            });
+        }
+
+        // unduh versi baru, cek sidik jari SHA-256, lalu tukar file .exe. File .exe yang sedang berjalan boleh
+        // diganti namanya di Windows: SlideDock.exe -> SlideDock.exe.old, file baru -> SlideDock.exe, lalu restart.
+        public static void Install(Dispatcher ui, Action restart, Action<string> fail)
+        {
+            UpdateInfo u = Available;
+            if (u == null || Busy) return;
+            Busy = true;
+            if (Changed != null) Changed();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                string fresh = exe + ".new", old = exe + ".old";
+                string err = null;
+                try
+                {
+                    using (WebClient wc = Client()) wc.DownloadFile(u.ExeUrl, fresh);
+                    byte[] data = File.ReadAllBytes(fresh);
+                    if (data.Length < 100000 || data[0] != 'M' || data[1] != 'Z') throw new Exception("The downloaded file is not a valid app.");
+                    if (u.ShaUrl != null)
+                    {
+                        string expect;
+                        using (WebClient wc = Client()) expect = wc.DownloadString(u.ShaUrl).Trim().Split(' ', '\t', '\r', '\n')[0];
+                        string got;
+                        using (System.Security.Cryptography.SHA256 sha = System.Security.Cryptography.SHA256.Create())
+                            got = BitConverter.ToString(sha.ComputeHash(data)).Replace("-", "");
+                        if (!string.Equals(expect, got, StringComparison.OrdinalIgnoreCase)) throw new Exception("The download was damaged (checksum mismatch).");
+                    }
+                    if (File.Exists(old)) File.Delete(old);
+                    File.Move(exe, old);
+                    try { File.Move(fresh, exe); }
+                    catch { File.Move(old, exe); throw; }            // gagal: kembalikan file lama
+                }
+                catch (UnauthorizedAccessException) { err = "SlideDock can't update itself in this folder."; }
+                catch (Exception ex) { err = ex.Message; }
+                if (err != null) { try { if (File.Exists(fresh)) File.Delete(fresh); } catch { } }
+                ui.BeginInvoke(new Action(delegate
+                {
+                    Busy = false;
+                    if (err == null) { restart(); return; }
+                    if (Changed != null) Changed();
+                    fail(err);
+                }));
+            });
+        }
+
+        // sisa update sebelumnya
+        public static void Cleanup()
+        {
+            try
+            {
+                string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                if (File.Exists(exe + ".old")) File.Delete(exe + ".old");
+                if (File.Exists(exe + ".new")) File.Delete(exe + ".new");
+            }
+            catch { }
+        }
+    }
+
+    // versi Microsoft Store: "Start with Windows" memakai StartupTask milik paket (bukan Task Scheduler)
+    static class PackagedStartup
+    {
+        const string Id = "SlideDockStartup";
+
+        public static bool On()
+        {
+            try
+            {
+                global::Windows.ApplicationModel.StartupTask st = Notifs.Wait(global::Windows.ApplicationModel.StartupTask.GetAsync(Id));
+                return st.State == global::Windows.ApplicationModel.StartupTaskState.Enabled
+                    || st.State == global::Windows.ApplicationModel.StartupTaskState.EnabledByPolicy;
+            }
+            catch { return false; }
+        }
+
+        public static void Set(bool on)
+        {
+            try
+            {
+                global::Windows.ApplicationModel.StartupTask st = Notifs.Wait(global::Windows.ApplicationModel.StartupTask.GetAsync(Id));
+                if (on) Notifs.Wait(st.RequestEnableAsync()); else st.Disable();
+            }
+            catch { }
+        }
+    }
+
     // pengaturan dock kecil-kecil (key=angka) di %APPDATA%\SlideDock\prefs.txt
     static class Prefs
     {
@@ -133,6 +322,9 @@ namespace SlideDock
         public static bool Notch { get { return Get("notch", 1) != 0; } set { Set("notch", value ? 1 : 0); } }
         public static bool WinKey { get { return Get("winkey", 1) != 0; } set { Set("winkey", value ? 1 : 0); } }
         public static bool HideTaskbar { get { return Get("hidetaskbar", 1) != 0; } set { Set("hidetaskbar", value ? 1 : 0); } }
+        // 0 = otomatis (menurut ukuran layar), 1 = kecil, 2 = sedang, 3 = besar
+        public static int DockSize { get { return Get("docksize", 0); } set { Set("docksize", value); } }
+        public static bool DockMove { get { return Get("dockmove", 0) != 0; } set { Set("dockmove", value ? 1 : 0); } }
     }
 
     static class Launcher
@@ -1266,14 +1458,14 @@ namespace SlideDock
         }
     }
 
-    // baterai sebagai cincin: lingkaran terisi sesuai persen, angka di tengah.
-    // Hijau saat mengisi daya, merah saat 20% ke bawah.
+    // baterai sebagai cincin: lingkaran putih terisi sesuai persen, angka di tengah.
+    // Petir biru saat mengisi daya, merah saat 20% ke bawah (dan tidak mengisi).
     class BatteryRing : Grid
     {
         readonly System.Windows.Shapes.Ellipse track = new System.Windows.Shapes.Ellipse();
         readonly System.Windows.Shapes.Path arc = new System.Windows.Shapes.Path();
         readonly TextBlock num = new TextBlock();
-        readonly Border bolt = new Border();
+        readonly TextBlock bolt;
         readonly double d, th;
         int lastPct = -1;
         bool lastCharging;
@@ -1296,20 +1488,14 @@ namespace SlideDock
             num.VerticalAlignment = VerticalAlignment.Center;
             num.TextAlignment = TextAlignment.Center;
             num.Margin = new Thickness(0, 0, 0, size * 0.03);
-            // penanda mengisi daya: lencana petir hijau di pojok kanan bawah cincin
-            double bs = Math.Max(10, Math.Min(18, Math.Round(size * 0.46)));
-            bolt.Width = bs;
-            bolt.Height = bs;
-            bolt.CornerRadius = new CornerRadius(bs / 2);
-            bolt.Background = new SolidColorBrush(Green);
-            bolt.BorderBrush = new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x20));
-            bolt.BorderThickness = new Thickness(Math.Max(1, size * 0.05));
+            // penanda mengisi daya: petir biru di pojok kanan bawah cincin (bayangan tipis agar tetap jelas di atas garis cincin)
+            double bs = Math.Max(10, Math.Min(17, Math.Round(size * 0.48)));
+            bolt = UI.Glyph("\uE945", bs);
+            bolt.Foreground = new SolidColorBrush(Blue);
             bolt.HorizontalAlignment = HorizontalAlignment.Right;
             bolt.VerticalAlignment = VerticalAlignment.Bottom;
-            bolt.Margin = new Thickness(0, 0, -bs * 0.32, -bs * 0.22);
-            TextBlock bg = UI.Glyph("", bs * 0.62);
-            bg.Foreground = new SolidColorBrush(Color.FromRgb(0x10, 0x30, 0x14));
-            bolt.Child = bg;
+            bolt.Margin = new Thickness(0, 0, -bs * 0.38, -bs * 0.2);
+            bolt.Effect = new DropShadowEffect { BlurRadius = 3, ShadowDepth = 0, Opacity = 0.9, Color = Color.FromRgb(0x10, 0x10, 0x16) };
             bolt.Visibility = Visibility.Collapsed;
             Children.Add(track);
             Children.Add(arc);
@@ -1318,7 +1504,7 @@ namespace SlideDock
             Set(100, false);
         }
 
-        public static readonly Color Green = Color.FromRgb(0x5E, 0xD0, 0x6C);
+        public static readonly Color Blue = Color.FromRgb(0x60, 0xCD, 0xFF);
         public static readonly Color Red = Color.FromRgb(0xFF, 0x60, 0x5C);
 
         public void Set(int pct, bool charging)
@@ -1330,7 +1516,7 @@ namespace SlideDock
             num.Text = pct.ToString();
             bolt.Visibility = charging ? Visibility.Visible : Visibility.Collapsed;
             num.FontSize = d * (pct >= 100 ? 0.33 : 0.4);
-            arc.Stroke = new SolidColorBrush(charging ? Green : pct <= 20 ? Red : Colors.White);
+            arc.Stroke = new SolidColorBrush(!charging && pct <= 20 ? Red : Colors.White);
             double r = (d - th) / 2, c = d / 2;
             if (pct >= 100) { arc.Data = new EllipseGeometry(new Point(c, c), r, r); return; }
             if (pct <= 0) { arc.Data = null; return; }
@@ -1372,9 +1558,22 @@ namespace SlideDock
         protected bool FixedSize;          // ukuran tidak berubah setelah tampil: cukup tangkap area di belakangnya saja
 
         // dock di kiri/kanan: popup muncul di samping dock, tegak di tengah layar
+        // posisi dock di layar (DIP). Dock bisa digeser, jadi popup mengikuti dock, bukan tengah layar.
+        public static Rect DockSpan = Rect.Empty;
+        // dock kiri/kanan: titik tengah tegak yang diinginkan (mis. ikon/jam yang diklik); NaN = tengah dock
+        protected double SideAnchor = double.NaN;
+
+        // dock di bawah: posisi kiri popup agar tengahnya sejajar dengan cx (NaN = tengah dock), tetap di layar
+        protected static double AlongX(double w, double cx)
+        {
+            if (double.IsNaN(cx)) cx = DockSpan.IsEmpty ? Scr.Left + Scr.Width / 2 : DockSpan.Left + DockSpan.Width / 2;
+            return Math.Max(Scr.Left + 8, Math.Min(Scr.Right - 8 - w, cx - w / 2));
+        }
+
         Point SidePoint(Size s)
         {
-            double y = Scr.Top + Math.Max(8, (Scr.Height - s.Height) / 2);
+            double c = !double.IsNaN(SideAnchor) ? SideAnchor : DockSpan.IsEmpty ? Scr.Top + Scr.Height / 2 : DockSpan.Top + DockSpan.Height / 2;
+            double y = Math.Max(Scr.Top + 8, Math.Min(Scr.Bottom - 8 - s.Height, c - s.Height / 2));
             double x = Layout.Side == 1 ? Scr.Left + SideGap : Scr.Right - SideGap - s.Width;
             return new Point(x, y);
         }
@@ -1436,12 +1635,24 @@ namespace SlideDock
         }
 
         // popup yang sedang terbuka pindah ke tengah titik lain (mis. ikon dock lain yang diklik)
-        protected void Reanchor(double centerX)
+        protected void Reanchor(Point center)
         {
-            if (!IsOpen || anchorCenter < 0 || Layout.V) return;
+            if (!IsOpen) return;
             BeginAnimation(Window.TopProperty, null);
             ++glideGen;
-            anchorCenter = centerX;
+            SideAnchor = center.Y;
+            if (Layout.V)
+            {
+                Point sp = SidePoint(new Size(ActualWidth, ActualHeight));
+                Left = sp.X;
+                Top = sp.Y;
+                curPos = sp;
+                UpdateLayout();
+                ApplySurface(false);
+                return;
+            }
+            if (anchorCenter < 0) return;
+            anchorCenter = center.X;
             PlaceAnchored();
         }
 
@@ -1951,6 +2162,12 @@ namespace SlideDock
 
         public static string Ssid()
         {
+            List<WifiNet> nat = Wifi.NativeNetworks();
+            if (nat != null)
+            {
+                WifiNet c = nat.FirstOrDefault(x => x.Connected);
+                return c != null ? c.Ssid : null;
+            }
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo("netsh", "wlan show interfaces");
@@ -2413,7 +2630,8 @@ namespace SlideDock
             if (IsOpen) return;
             search.Text = "";
             Rebuild();
-            SlideIn(delegate(Size s) { return new Point(Popover.Scr.Left + (Popover.Scr.Width - s.Width) / 2, dockTop - s.Height + 6); });
+            SideAnchor = double.NaN;
+            SlideIn(delegate(Size s) { return new Point(AlongX(s.Width, double.NaN), dockTop - s.Height + 6); });
             search.Focus();
         }
 
@@ -2707,9 +2925,39 @@ namespace SlideDock
             date.FontSize = 12.5;
             date.FontFamily = UI.Text;
             date.TextWrapping = TextWrapping.Wrap;
-            info.Children.Add(greet);
+            // pojok kanan atas: PC settings, Dock settings & Task Manager cukup sebagai ikon
+            Grid top = new Grid();
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            greet.VerticalAlignment = VerticalAlignment.Center;
+            greet.TextTrimming = TextTrimming.CharacterEllipsis;
+            top.Children.Add(greet);
+            StackPanel icons = new StackPanel();
+            icons.Orientation = Orientation.Horizontal;
+            icons.Margin = new Thickness(0, -6, -6, 0);
+            top.Margin = new Thickness(0, 0, 0, 2);
+            Border pcBtn = IconBtn("\uE713", "PC settings");
+            UI.Hover(pcBtn, 0x30);
+            pcBtn.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open("ms-settings:"); };
+            icons.Children.Add(pcBtn);
+            dockSettingsRow = IconBtn("\uE771", "Dock settings");
+            dockSettingsRow.MouseEnter += delegate { if (!settingsMode) dockSettingsRow.Background = new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)); };
+            dockSettingsRow.MouseLeave += delegate { if (!settingsMode) dockSettingsRow.Background = Brushes.Transparent; };
+            dockSettingsRow.MouseLeftButtonUp += delegate { SetSettingsMode(!settingsMode); };
+            icons.Children.Add(dockSettingsRow);
+            Border tmBtn = IconBtn("\uE9D9", "Task Manager (Ctrl+Shift+Esc)");
+            UI.Hover(tmBtn, 0x30);
+            tmBtn.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open("taskmgr.exe"); };
+            icons.Children.Add(tmBtn);
+            Grid.SetColumn(icons, 1);
+            top.Children.Add(icons);
+            // di luar area gulir: tidak ikut terpotong (sebelumnya kotak hover terpotong di atas & kanan)
+            DockPanel.SetDock(top, Dock.Top);
+            rp.Children.Add(top);
             info.Children.Add(clock);
             info.Children.Add(date);
+            BuildUpdateBar();
+            info.Children.Add(updateBar);
             Border sep = new Border();
             sep.Height = 1;
             sep.Margin = new Thickness(0, 16, 0, 12);
@@ -2729,71 +2977,12 @@ namespace SlideDock
             trayWrap.MaxWidth = 220;
             trayWrap.Margin = new Thickness(-6, 0, 0, 0);
             info.Children.Add(trayWrap);
-            Border settings = new Border();
-            settings.CornerRadius = new CornerRadius(10);
-            settings.Padding = new Thickness(8, 7, 8, 7);
-            settings.Margin = new Thickness(-8, 10, 0, 0);
-            settings.Background = Brushes.Transparent;
-            settings.Cursor = Cursors.Hand;
-            UI.Hover(settings, 0x30);
-            StackPanel sr = new StackPanel();
-            sr.Orientation = Orientation.Horizontal;
-            sr.Children.Add(UI.Glyph("", 14));
-            TextBlock st = new TextBlock();
-            st.Text = "PC settings";
-            st.Foreground = Brushes.White;
-            st.FontSize = 13;
-            st.FontFamily = UI.Text;
-            st.Margin = new Thickness(10, 0, 0, 0);
-            sr.Children.Add(st);
-            settings.Child = sr;
-            settings.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open("ms-settings:"); };
-            info.Children.Add(settings);
-
-            dockSettingsRow = new Border();
-            dockSettingsRow.CornerRadius = new CornerRadius(10);
-            dockSettingsRow.Padding = new Thickness(8, 7, 8, 7);
-            dockSettingsRow.Margin = new Thickness(-8, 2, 0, 0);
-            dockSettingsRow.Background = Brushes.Transparent;
-            dockSettingsRow.Cursor = Cursors.Hand;
-            dockSettingsRow.MouseEnter += delegate { if (!settingsMode) dockSettingsRow.Background = new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)); };
-            dockSettingsRow.MouseLeave += delegate { if (!settingsMode) dockSettingsRow.Background = Brushes.Transparent; };
-            StackPanel dr = new StackPanel();
-            dr.Orientation = Orientation.Horizontal;
-            dr.Children.Add(UI.Glyph("\uE771", 14));
-            TextBlock dtx = new TextBlock();
-            dtx.Text = "Dock settings";
-            dtx.Foreground = Brushes.White;
-            dtx.FontSize = 13;
-            dtx.FontFamily = UI.Text;
-            dtx.Margin = new Thickness(10, 0, 0, 0);
-            dr.Children.Add(dtx);
-            dockSettingsRow.Child = dr;
-            dockSettingsRow.MouseLeftButtonUp += delegate { SetSettingsMode(!settingsMode); };
-            info.Children.Add(dockSettingsRow);
-
-            Border taskMgr = new Border();
-            taskMgr.CornerRadius = new CornerRadius(10);
-            taskMgr.Padding = new Thickness(8, 7, 8, 7);
-            taskMgr.Margin = new Thickness(-8, 2, 0, 0);
-            taskMgr.Background = Brushes.Transparent;
-            taskMgr.Cursor = Cursors.Hand;
-            taskMgr.ToolTip = "Ctrl+Shift+Esc";
-            UI.Hover(taskMgr, 0x30);
-            StackPanel tr = new StackPanel();
-            tr.Orientation = Orientation.Horizontal;
-            tr.Children.Add(UI.Glyph("\uE9D9", 14));
-            TextBlock tt = new TextBlock();
-            tt.Text = "Task Manager";
-            tt.Foreground = Brushes.White;
-            tt.FontSize = 13;
-            tt.FontFamily = UI.Text;
-            tt.Margin = new Thickness(10, 0, 0, 0);
-            tr.Children.Add(tt);
-            taskMgr.Child = tr;
-            taskMgr.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open("taskmgr.exe"); };
-            info.Children.Add(taskMgr);
-            rp.Children.Add(info);
+            // banyak app di latar belakang: kolom info bisa digulir, tidak pernah menimpa tombol daya / Done
+            ScrollViewer isv = new ScrollViewer();
+            isv.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
+            isv.Content = info;
+            isv.Margin = new Thickness(0, 0, 0, 10);
+            rp.Children.Add(isv);
 
             right.Child = rp;
             root.Children.Add(right);
@@ -2809,6 +2998,76 @@ namespace SlideDock
             clockTimer.Interval = TimeSpan.FromSeconds(1);
             clockTimer.Tick += delegate { UpdateClock(); };
             IsVisibleChanged += delegate { if (IsVisible) clockTimer.Start(); else clockTimer.Stop(); };
+        }
+
+        // ----- banner "Update available" di kolom kanan Start -----
+        public Action OnUpdate;
+        readonly Border updateBar = new Border();
+        readonly TextBlock updateText = new TextBlock();
+        readonly Border updateBtn = new Border();
+        readonly TextBlock updateBtnText = new TextBlock();
+
+        void BuildUpdateBar()
+        {
+            updateBar.CornerRadius = new CornerRadius(12);
+            updateBar.Margin = new Thickness(0, 14, 0, 0);
+            updateBar.Padding = new Thickness(12, 9, 9, 9);
+            updateBar.Background = new SolidColorBrush(Color.FromArgb(0x33, 0x60, 0xCD, 0xFF));
+            updateBar.BorderBrush = new SolidColorBrush(Color.FromArgb(0x66, 0x60, 0xCD, 0xFF));
+            updateBar.BorderThickness = new Thickness(1);
+            updateBar.Visibility = Visibility.Collapsed;
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            updateText.Foreground = Brushes.White;
+            updateText.FontSize = 12.5;
+            updateText.FontFamily = UI.Text;
+            updateText.TextWrapping = TextWrapping.Wrap;
+            updateText.VerticalAlignment = VerticalAlignment.Center;
+            g.Children.Add(updateText);
+            updateBtn.CornerRadius = new CornerRadius(8);
+            updateBtn.Padding = new Thickness(12, 5, 12, 6);
+            updateBtn.Margin = new Thickness(8, 0, 0, 0);
+            updateBtn.Cursor = Cursors.Hand;
+            updateBtn.VerticalAlignment = VerticalAlignment.Center;
+            updateBtn.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
+            updateBtnText.Text = "Update";
+            updateBtnText.FontSize = 12.5;
+            updateBtnText.FontWeight = FontWeights.SemiBold;
+            updateBtnText.FontFamily = UI.Text;
+            updateBtnText.Foreground = Brushes.Black;
+            updateBtn.Child = updateBtnText;
+            updateBtn.MouseLeftButtonUp += delegate { if (OnUpdate != null) OnUpdate(); };
+            Grid.SetColumn(updateBtn, 1);
+            g.Children.Add(updateBtn);
+            updateBar.Child = g;
+        }
+
+        // dipanggil setiap status update berubah
+        public void RefreshUpdate()
+        {
+            UpdateInfo u = Updater.Available;
+            updateBar.Visibility = u != null ? Visibility.Visible : Visibility.Collapsed;
+            if (u != null)
+            {
+                updateText.Text = Updater.Busy ? "Downloading SlideDock " + u.Ver.ToString(3) + "..." : "SlideDock " + u.Ver.ToString(3) + " is available";
+                updateBtn.Visibility = Updater.Busy ? Visibility.Collapsed : Visibility.Visible;
+            }
+            if (settingsMode && IsOpen) RenderSettings();
+        }
+
+        static Border IconBtn(string glyph, string tip)
+        {
+            Border b = new Border();
+            b.Width = 32;
+            b.Height = 30;
+            b.Margin = new Thickness(2, 0, 0, 0);
+            b.CornerRadius = new CornerRadius(8);
+            b.Background = Brushes.Transparent;
+            b.Cursor = Cursors.Hand;
+            b.ToolTip = tip;
+            b.Child = UI.Glyph(glyph, 14);
+            return b;
         }
 
         FrameworkElement InfoRow(string glyph, TextBlock text)
@@ -3173,7 +3432,8 @@ namespace SlideDock
             Rebuild();
             FillInfo();
             sv.ScrollToTop();
-            SlideIn(delegate(Size s) { return new Point(Popover.Scr.Left + (Popover.Scr.Width - s.Width) / 2, dockTop - s.Height + 6); });
+            SideAnchor = double.NaN;
+            SlideIn(delegate(Size s) { return new Point(AlongX(s.Width, double.NaN), dockTop - s.Height + 6); });
         }
 
         public void RefreshIfOpen()
@@ -3576,6 +3836,14 @@ namespace SlideDock
     {
         static string Run(string args)
         {
+            string o;
+            RunCode(args, out o);
+            return o;
+        }
+
+        static int RunCode(string args, out string output)
+        {
+            output = "";
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo("netsh", args);
@@ -3584,15 +3852,102 @@ namespace SlideDock
                 psi.RedirectStandardOutput = true;
                 using (Process p = Process.Start(psi))
                 {
-                    string o = p.StandardOutput.ReadToEnd();
-                    p.WaitForExit(8000);
-                    return o;
+                    output = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(8000)) return -1;
+                    return p.ExitCode;
                 }
             }
-            catch { return ""; }
+            catch { return -1; }
+        }
+
+        [DllImport("wlanapi.dll")] static extern int WlanGetAvailableNetworkList(IntPtr h, ref Guid iface, uint flags, IntPtr res, out IntPtr list);
+
+        // nama keamanan yang dipakai Connect() (cocok dengan teks netsh versi Inggris)
+        static string AuthName(int algo, bool secured)
+        {
+            switch (algo)
+            {
+                case 1: return secured ? "WEP" : "Open";
+                case 4: return "WPA-Personal";
+                case 7: return "WPA2-Personal";
+                case 9: return "WPA3-Personal";
+                case 10: return "OWE";
+                case 3: case 6: case 8: case 11: return "WPA2-Enterprise";
+                default: return secured ? "Secured" : "Open";
+            }
+        }
+
+        // daftar jaringan langsung dari Windows (WLAN API). Sama di semua bahasa Windows, tidak seperti
+        // teks netsh ("Signal" / "Sinyal"...). null = API tidak tersedia (mis. PC tanpa Wi-Fi).
+        public static List<WifiNet> NativeNetworks()
+        {
+            IntPtr h = IntPtr.Zero, ifs = IntPtr.Zero;
+            try
+            {
+                uint ver;
+                if (WlanOpenHandle(2, IntPtr.Zero, out ver, out h) != 0) return null;
+                if (WlanEnumInterfaces(h, IntPtr.Zero, out ifs) != 0) return null;
+                List<WifiNet> l = new List<WifiNet>();
+                int count = Marshal.ReadInt32(ifs);
+                for (int i = 0; i < count; i++)
+                {
+                    Guid g = (Guid)Marshal.PtrToStructure(new IntPtr(ifs.ToInt64() + 8 + i * 532), typeof(Guid));
+                    IntPtr nl;
+                    if (WlanGetAvailableNetworkList(h, ref g, 0, IntPtr.Zero, out nl) != 0) continue;
+                    try
+                    {
+                        int n = Marshal.ReadInt32(nl);
+                        for (int k = 0; k < n; k++)
+                        {
+                            long b = nl.ToInt64() + 8 + (long)k * 628;        // WLAN_AVAILABLE_NETWORK = 628 byte
+                            int len = Marshal.ReadInt32(new IntPtr(b + 512));
+                            if (len <= 0 || len > 32) continue;                 // jaringan tersembunyi
+                            byte[] raw = new byte[len];
+                            Marshal.Copy(new IntPtr(b + 516), raw, 0, len);
+                            WifiNet w = new WifiNet();
+                            w.Ssid = Encoding.UTF8.GetString(raw);
+                            w.Signal = Marshal.ReadInt32(new IntPtr(b + 604));
+                            bool sec = Marshal.ReadInt32(new IntPtr(b + 608)) != 0;
+                            w.Auth = AuthName(Marshal.ReadInt32(new IntPtr(b + 612)), sec);
+                            int flags = Marshal.ReadInt32(new IntPtr(b + 620));
+                            w.Connected = (flags & 1) != 0;                    // WLAN_AVAILABLE_NETWORK_CONNECTED
+                            w.Known = (flags & 2) != 0;                        // ..._HAS_PROFILE
+                            l.Add(w);
+                        }
+                    }
+                    finally { WlanFreeMemory(nl); }
+                }
+                return l;
+            }
+            catch { return null; }
+            finally
+            {
+                if (ifs != IntPtr.Zero) WlanFreeMemory(ifs);
+                if (h != IntPtr.Zero) WlanCloseHandle(h, IntPtr.Zero);
+            }
         }
 
         public static List<WifiNet> Scan()
+        {
+            List<WifiNet> nat = NativeNetworks();
+            if (nat != null)
+            {
+                // satu SSID bisa muncul dua kali (dengan & tanpa profil tersimpan): gabungkan
+                List<WifiNet> merged = nat.Where(x => x.Ssid.Length > 0).GroupBy(x => x.Ssid).Select(g =>
+                {
+                    WifiNet m = g.OrderByDescending(x => x.Signal).First();
+                    m.Signal = g.Max(x => x.Signal);
+                    m.Known = g.Any(x => x.Known);
+                    m.Connected = g.Any(x => x.Connected);
+                    return m;
+                }).ToList();
+                return merged.OrderByDescending(x => x.Connected).ThenByDescending(x => x.Signal).ToList();
+            }
+            return ScanNetsh();
+        }
+
+        // cadangan bila WLAN API tidak tersedia (hanya akurat di Windows berbahasa Inggris)
+        static List<WifiNet> ScanNetsh()
         {
             string cur = SysInfo.Ssid();
             HashSet<string> known = new HashSet<string>();
@@ -3679,8 +4034,11 @@ namespace SlideDock
                 }
                 finally { try { File.Delete(file); } catch { } }   // file berisi kata sandi: langsung dihapus
             }
-            string o = Run("wlan connect name=\"" + n.Ssid.Replace("\"", "") + "\"");
-            return o.IndexOf("successfully", StringComparison.OrdinalIgnoreCase) >= 0 ? null : o.Trim();
+            // berhasil/tidak dilihat dari kode keluar netsh, bukan teksnya: teks "successfully" hanya ada di
+            // Windows berbahasa Inggris (dulu di bahasa lain sambungan dianggap gagal & profil baru dihapus)
+            string o;
+            int code = RunCode("wlan connect name=\"" + n.Ssid.Replace("\"", "") + "\"", out o);
+            return code == 0 ? null : (o.Trim().Length > 0 ? o.Trim() : "Could not connect to " + n.Ssid + ".");
         }
 
         public static void Disconnect() { Run("wlan disconnect"); }
@@ -4466,25 +4824,22 @@ namespace SlideDock
         }
 
         // mode: "wifi", "sound", "battery" atau "all"; centerX = tengah ikon dock yang diklik
-        public void ShowAt(string mode, double centerX, double dockTop)
+        public void ShowAt(string mode, Point center, double dockTop)
         {
             if (IsOpen) return;
             SysInfo.ResetAudio();
+            SideAnchor = center.Y;
             SwitchMode(mode);
-            SlideIn(delegate(Size s)
-            {
-                double x = Math.Max(Popover.Scr.Left + 8, Math.Min(centerX - s.Width / 2, Popover.Scr.Right - 8 - s.Width));
-                return new Point(x, dockTop - s.Height + 6);
-            });
+            SlideIn(delegate(Size s) { return new Point(AlongX(s.Width, center.X), dockTop - s.Height + 6); });
         }
 
         // sudah terbuka, ikon lain diklik: ganti isi & pindah ke atas ikon itu tanpa menutup
-        public void Switch(string mode, double centerX)
+        public void Switch(string mode, Point center)
         {
             if (!IsOpen) return;
             SwitchMode(mode);
             UpdateLayout();
-            Reanchor(centerX);
+            Reanchor(center);
         }
     }
 
@@ -4500,7 +4855,7 @@ namespace SlideDock
 
         // tunggu operasi WinRT selesai (dipanggil dari thread latar). Tanpa AsTask, supaya bisa di-build
         // dengan metadata bawaan Windows (System32\WinMetadata) tanpa perlu Windows SDK.
-        static T Wait<T>(global::Windows.Foundation.IAsyncOperation<T> op)
+        public static T Wait<T>(global::Windows.Foundation.IAsyncOperation<T> op)
         {
             Stopwatch sw = Stopwatch.StartNew();
             while (op.Status == global::Windows.Foundation.AsyncStatus.Started)
@@ -4888,20 +5243,17 @@ namespace SlideDock
             return s.Length == 0 ? s : char.ToUpper(s[0]) + s.Substring(1);
         }
 
-        public void ShowAt(double right, double dockTop)
+        public void ShowAt(Point clock, double dockTop)
         {
             if (IsOpen) return;
+            SideAnchor = clock.Y;
             month = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
             title.Text = Cap(DateTime.Today.ToString("dddd, d MMMM yyyy", Id));
             ArrangeCards();
             LoadNotifs();
             Render();
             AnchorCenter = true;
-            SlideIn(delegate(Size s)
-            {
-                double x = Popover.Scr.Left + (Popover.Scr.Width - s.Width) / 2;
-                return new Point(x, dockTop - s.Height + 6);
-            });
+            SlideIn(delegate(Size s) { return new Point(AlongX(s.Width, clock.X), dockTop - s.Height + 6); });
         }
     }
 
@@ -5114,6 +5466,60 @@ namespace SlideDock
             SizeChanged += delegate { Place(); ApplyGlass(); UpdateThumbs(); };
             watch.Interval = TimeSpan.FromMilliseconds(120);
             watch.Tick += delegate { CheckCursor(); };
+
+            // seret file ke atas salah satu pratinjau & tahan sebentar: jendela itu naik ke depan,
+            // file tetap terseret sehingga bisa langsung dilepas di app tersebut
+            AllowDrop = true;
+            dragTimer.Interval = TimeSpan.FromMilliseconds(450);
+            dragTimer.Tick += delegate
+            {
+                dragTimer.Stop();
+                IntPtr w = dragWin;
+                SetDragCard(null);
+                if (w == IntPtr.Zero || !IsWindow(w)) return;
+                WinRaise.Raise(w);
+                HidePreview();
+            };
+            DragEnter += delegate(object s, DragEventArgs e) { DragOverCards(e); };
+            DragOver += delegate(object s, DragEventArgs e) { DragOverCards(e); };
+            DragLeave += delegate(object s, DragEventArgs e)
+            {
+                Point q = e.GetPosition(this);
+                if (q.X < 0 || q.Y < 0 || q.X >= ActualWidth || q.Y >= ActualHeight) SetDragCard(null);   // benar-benar keluar jendela
+            };
+            Drop += delegate(object s, DragEventArgs e) { e.Effects = DragDropEffects.None; e.Handled = true; SetDragCard(null); };
+        }
+
+        readonly DispatcherTimer dragTimer = new DispatcherTimer();
+        Border dragCard;
+        IntPtr dragWin = IntPtr.Zero;
+
+        void DragOverCards(DragEventArgs e)
+        {
+            e.Effects = DragDropEffects.None;          // pratinjau bukan tempat menjatuhkan file
+            e.Handled = true;
+            Point q = e.GetPosition(this);
+            Border hit = null;
+            foreach (UIElement c in cards.Children)
+            {
+                Border card = c as Border;
+                if (card == null || !(card.Tag is IntPtr)) continue;
+                Point o = card.TranslatePoint(new Point(0, 0), this);
+                if (new Rect(o, card.RenderSize).Contains(q)) { hit = card; break; }
+            }
+            SetDragCard(hit);
+        }
+
+        void SetDragCard(Border card)
+        {
+            if (card == dragCard) return;
+            if (dragCard != null) dragCard.Background = Brushes.Transparent;
+            dragCard = card;
+            dragTimer.Stop();
+            dragWin = card != null ? (IntPtr)card.Tag : IntPtr.Zero;
+            if (card == null) return;
+            card.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            dragTimer.Start();
         }
 
         public bool Showing { get { return IsVisible && Key != null; } }
@@ -5206,6 +5612,9 @@ namespace SlideDock
         public void HidePreview()
         {
             watch.Stop();
+            dragTimer.Stop();
+            dragCard = null;
+            dragWin = IntPtr.Zero;
             ClearThumbs();
             Key = null;
             if (IsVisible) Hide();
@@ -5235,6 +5644,7 @@ namespace SlideDock
                 card.CornerRadius = new CornerRadius(10);
                 card.Background = Brushes.Transparent;
                 card.Cursor = Cursors.Hand;
+                card.Tag = win;
                 card.MouseEnter += delegate { card.Background = new SolidColorBrush(Color.FromArgb(0x2D, 255, 255, 255)); };
                 card.MouseLeave += delegate { card.Background = Brushes.Transparent; };
 
@@ -5391,13 +5801,35 @@ namespace SlideDock
         }
     }
 
+    // jendela dinaikkan ke paling depan walau SlideDock bukan app yang aktif (mis. saat Explorer sedang
+    // menyeret file). Untuk menjatuhkan file, jendela tujuan cukup terlihat paling depan, tidak perlu aktif.
+    static class WinRaise
+    {
+        [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        public static void Raise(IntPtr w)
+        {
+            if (Native.IsIconic(w)) Native.ShowWindow(w, 4);       // SW_SHOWNOACTIVATE: pulihkan tanpa merebut fokus
+            const uint f = 0x0001 | 0x0002 | 0x0010 | 0x0040;      // NOSIZE | NOMOVE | NOACTIVATE | SHOWWINDOW
+            SetWindowPos(w, new IntPtr(-1), 0, 0, 0, 0, f);        // HWND_TOPMOST: naik ke paling depan...
+            SetWindowPos(w, new IntPtr(-2), 0, 0, 0, 0, f);        // ...HWND_NOTOPMOST: lalu tidak lagi "selalu di atas"
+        }
+    }
+
     // ================= dock =================
     class DockWindow : Window
     {
         public Action OnToggle, OnDoubleClick, OnFullscreen, OnSearch, OnPower, OnClock, OnTray;
         public Action<string> OnQuick;      // "wifi", "sound" atau "battery": ikon status mana yang diklik
         public bool HotkeyOk;
-        public double SurfaceTop { get { return Top + ActualHeight - (fullCard != null && fullCard.ActualHeight > 0 ? fullCard.ActualHeight : 70); } }
+        public double SurfaceTop
+        {
+            get
+            {
+                if (fullCard == null || fullCard.ActualHeight <= 0) return Top + ActualHeight - 70;
+                return Top + fullCard.TranslatePoint(new Point(0, 0), this).Y;
+            }
+        }
         public Func<bool> AnyPopupOpen;
         public Action OnPopup;
         public void HidePreview() { previewTimer.Stop(); preview.HidePreview(); }
@@ -5436,7 +5868,7 @@ namespace SlideDock
         public Rect ScreenDip;
         public bool IsPrimary;
         public double ScreenScale = 1;
-        public double SurfaceExtent { get { return (fullCard != null && fullCard.ActualWidth > 0 ? fullCard.ActualWidth : 70) + 10; } }
+        public double SurfaceExtent { get { return (fullCard != null && fullCard.ActualWidth > 0 ? fullCard.ActualWidth * DockScale : 70) + 10; } }
         public string Device;
 
         public DockWindow(Rect scr, bool primary)
@@ -5478,7 +5910,7 @@ namespace SlideDock
             // klik kanan area kosong dock = menu SlideDock (pengganti ikon tray yang ikut tersembunyi)
             AttachDockMenu(card);
             BuildNotch();
-            Grid rootGrid = new Grid();
+            rootGrid = new Grid();
             // lapisan bentuk transisi: satu bentuk yang melebar/menyusut antara notch & dock penuh
             morphLayer = new Canvas();
             morphLayer.IsHitTestVisible = false;
@@ -5492,6 +5924,13 @@ namespace SlideDock
             rootGrid.Children.Add(card);
             rootGrid.Children.Add(notch);
             Content = rootGrid;
+            ApplySize();
+            SetupDrag(card, false);
+            SetupDrag(notch, true);
+            PreviewMouseMove += delegate(object s, MouseEventArgs e) { DragMove(e); };
+            notch.SizeChanged += delegate { if (!dragging) SetSlide(slideCur); };
+            card.SizeChanged += delegate { if (!dragging) ApplySlide(false); };
+            SizeChanged += delegate { if (!dragging) ApplySlide(false); };
             LoadTheme();
             StyleSurfaces();
             // cek posisi kursor tiap 150 ms: dekat dock = buka penuh, menjauh 0,7 detik = kembali ke notch
@@ -5514,8 +5953,16 @@ namespace SlideDock
                 if (suppressUp) { suppressUp = false; return; }
                 if (OnToggle != null) OnToggle();
             };
+            PreviewDragEnter += delegate(object s, DragEventArgs e) { DragHover(e); };
+            PreviewDragOver += delegate(object s, DragEventArgs e) { DragHover(e); };
+            DragLeave += delegate(object s, DragEventArgs e)
+            {
+                Point q = e.GetPosition(this);
+                if (q.X < 0 || q.Y < 0 || q.X >= ActualWidth || q.Y >= ActualHeight) { dragHoverEl = null; previewTimer.Stop(); }
+            };
             Drop += delegate(object s, DragEventArgs e)
             {
+                dragHoverEl = null;
                 string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
                 if (files == null) return;
                 foreach (string f in files) PinStore.Add(f, System.IO.Path.GetFileNameWithoutExtension(f));
@@ -5537,6 +5984,161 @@ namespace SlideDock
         }
         readonly DispatcherTimer tickTimer = new DispatcherTimer();
 
+
+        // ----- ukuran dock: kecil / sedang / besar, atau otomatis menurut ukuran layar -----
+        Grid rootGrid;
+        public double DockScale = 1;
+
+        public static double ScaleFor(int size, Rect scr)
+        {
+            if (size == 1) return 0.8;
+            if (size == 2) return 0.9;
+            if (size == 3) return 1.0;
+            // otomatis: layar kecil (mis. laptop 15" dengan skala 125%) memakai dock yang lebih kecil
+            double h = Layout.V ? scr.Width : scr.Height;
+            return h < 800 ? 0.8 : h < 1000 ? 0.9 : 1.0;
+        }
+
+        public void ApplySize()
+        {
+            DockScale = ScaleFor(Prefs.DockSize, ScreenDip);
+            rootGrid.LayoutTransform = Math.Abs(DockScale - 1) < 0.001 ? Transform.Identity : new ScaleTransform(DockScale, DockScale);
+            Dispatcher.BeginInvoke(new Action(delegate { ApplySlide(false); }), DispatcherPriority.Loaded);
+        }
+
+        // ----- geser dock di sepanjang tepinya (bawah: kiri-kanan, kiri/kanan: atas-bawah) -----
+        // Satu posisi (pecahan -1..1) dipakai bersama: notch digeser sampai pojok = -1/1, dock penuh pun
+        // menempel di ujung yang sama, jadi saat dibuka dock "tumbuh" dari tempat notch berada.
+        // Notch maupun dock penuh sama-sama bisa digeser.
+        readonly TranslateTransform cardShift = new TranslateTransform();
+        readonly TranslateTransform notchShift = new TranslateTransform();
+        double slideTarget, slideCur;          // pecahan -1..1
+        bool slideLoop, dragArmed, dragging;
+        Point dragStart;
+        double dragFrom, dragRange;
+        FrameworkElement dragEl;
+        readonly Stopwatch slideWatch = new Stopwatch();
+
+        string SlideKey { get { return "slide" + Layout.Side; } }
+
+        // jarak geser maksimum dari tengah (satuan dalam dock, sebelum skala) agar tetap di dalam layar
+        double RangeOf(FrameworkElement e)
+        {
+            if (e == null || DockScale <= 0) return 0;
+            double win = (Layout.V ? ActualHeight : ActualWidth) / DockScale;
+            double size = Layout.V ? e.ActualHeight : e.ActualWidth;
+            if (size <= 0) return 0;
+            return Math.Max(0, (win - size) / 2 - 8);
+        }
+
+        public void ApplySlide(bool animate)
+        {
+            double frac = Prefs.DockMove ? Prefs.Get(SlideKey, 0) / 1000.0 : 0;
+            slideTarget = Math.Max(-1, Math.Min(1, frac));
+            if (animate) { StartSlideLoop(); return; }
+            slideCur = slideTarget;
+            SetSlide(slideCur);
+        }
+
+        void SetSlide(double f)
+        {
+            double c = f * RangeOf(fullCard), n = f * RangeOf(notch);
+            if (Layout.V) { cardShift.X = 0; cardShift.Y = c; notchShift.X = 0; notchShift.Y = n; }
+            else { cardShift.X = c; cardShift.Y = 0; notchShift.X = n; notchShift.Y = 0; }
+        }
+
+        void StartSlideLoop()
+        {
+            if (slideLoop) return;
+            slideLoop = true;
+            slideWatch.Restart();
+            CompositionTarget.Rendering += SlideStep;
+        }
+
+        // tiap frame layar (60 fps): mendekati target dengan halus, dihitung dari waktu yang berlalu
+        void SlideStep(object sender, EventArgs e)
+        {
+            double dt = Math.Min(50, slideWatch.Elapsed.TotalMilliseconds);
+            slideWatch.Restart();
+            double d = slideTarget - slideCur;
+            if (!dragging && Math.Abs(d) < 0.0005)
+            {
+                slideCur = slideTarget;
+                SetSlide(slideCur);
+                CompositionTarget.Rendering -= SlideStep;
+                slideLoop = false;
+                return;
+            }
+            slideCur += d * (1 - Math.Pow(1 - 0.35, dt / 16.7));
+            SetSlide(slideCur);
+        }
+
+        // bagian yang bisa diklik (ikon, jam, status, app di notch) tidak memulai geser; area kosong bisa
+        static bool IsInteractive(DependencyObject o, FrameworkElement stop)
+        {
+            while (o != null && o != stop)
+            {
+                FrameworkElement fe = o as FrameworkElement;
+                if (fe != null && fe.Cursor == Cursors.Hand) return true;
+                o = o is Visual ? VisualTreeHelper.GetParent(o) : LogicalTreeHelper.GetParent(o);
+            }
+            return false;
+        }
+
+        void SetupDrag(FrameworkElement el, bool isNotch)
+        {
+            el.PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (!Prefs.DockMove || e.ClickCount > 1 || compact != isNotch) return;
+                if (IsInteractive(e.OriginalSource as DependencyObject, el)) return;
+                dragArmed = true;
+                dragEl = el;
+                dragStart = e.GetPosition(this);
+                dragFrom = slideTarget;
+            };
+            el.PreviewMouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (dragging) e.Handled = true;               // digeser = bukan klik (tidak membuka Start / dock)
+                EndDrag();
+            };
+            el.LostMouseCapture += delegate { if (dragging) EndDrag(); };
+        }
+
+        void DragMove(MouseEventArgs e)
+        {
+            if (!dragArmed) return;
+            if (e.LeftButton != MouseButtonState.Pressed) { EndDrag(); return; }
+            Point pos = e.GetPosition(this);
+            double delta = Layout.V ? pos.Y - dragStart.Y : pos.X - dragStart.X;
+            if (!dragging)
+            {
+                if (Math.Abs(delta) < 5) return;              // ambang kecil: klik biasa tidak ikut menggeser
+                dragRange = RangeOf(dragEl);
+                if (dragRange <= 0) { dragArmed = false; return; }
+                dragging = true;
+                dragEl.CaptureMouse();
+                HidePreview();
+                Magnify(double.NaN);
+                MenuCloser.CloseAll();
+                EndPeek(true);                                // menggeser notch tidak membuka dock
+            }
+            slideTarget = Math.Max(-1, Math.Min(1, dragFrom + delta / DockScale / dragRange));
+            StartSlideLoop();
+        }
+
+        void EndDrag()
+        {
+            bool was = dragging;
+            dragArmed = false;
+            dragging = false;
+            if (dragEl != null && dragEl.IsMouseCaptured) dragEl.ReleaseMouseCapture();
+            if (!was) return;
+            lastNear = DateTime.Now;
+            Prefs.Set(SlideKey, (int)Math.Round(slideTarget * 1000));
+            if (OnDockMoved != null) OnDockMoved(this);
+        }
+
+        public Action<DockWindow> OnDockMoved;
 
         // ----- notch: dock mengecil saat ada app aktif (mirip Poni, tapi di bawah) -----
         // ----- tema: Glass (kaca buram) / Dark; bentuk menempel ke tepi bawah layar -----
@@ -5636,7 +6238,7 @@ namespace SlideDock
                     b.HorizontalAlignment = Layout.Side == 1 ? HorizontalAlignment.Left : Layout.Side == 2 ? HorizontalAlignment.Right : HorizontalAlignment.Center;
                     b.VerticalAlignment = Layout.V ? VerticalAlignment.Center : VerticalAlignment.Bottom;
                     b.RenderTransformOrigin = Layout.Origin;
-                    b.RenderTransform = new ScaleTransform(1, 1);
+                    b.RenderTransform = b == notch ? notchShift : cardShift;
                     b.Background = null;
                     b.BorderThickness = new Thickness(0);
                     b.CornerRadius = new CornerRadius(0);
@@ -5649,6 +6251,8 @@ namespace SlideDock
                         else c.Margin = b == notch ? new Thickness(16 + Flare, 7, 18 + Flare, 8) : new Thickness(8 + Flare, 6, 8 + Flare, 4);
                     }
                 }
+                FrameworkElement nc = notch.Child as FrameworkElement;
+                if (nc != null) notchContentBase = nc.Margin;
                 WrapWithShape(fullCard, 20, out fullShape, out fullGloss);
                 WrapWithShape(notch, 14, out notchShape, out notchGloss);
             }
@@ -5740,7 +6344,6 @@ namespace SlideDock
             notch.Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 2, Opacity = 0.45, Color = Colors.Black };
             notch.Opacity = 0;
             notch.IsHitTestVisible = false;
-            notch.ToolTip = "Hover to open the dock";
             StackPanel sp = new StackPanel();
             sp.Orientation = Layout.V ? Orientation.Vertical : Orientation.Horizontal;
             notchIcon.Width = 20;
@@ -5756,6 +6359,16 @@ namespace SlideDock
             dot.Margin = Layout.V ? new Thickness(0, 8, 0, 8) : new Thickness(10, 0, 10, 0);
             dot.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
             notchSep = dot;
+            notch.Cursor = Cursors.Hand;
+            // klik bagian notch yang bukan ikon app = langsung buka dock penuh (tanpa menunggu jeda)
+            notch.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (e.Handled || !compact) return;
+                e.Handled = true;
+                lastNear = DateTime.Now;
+                EndPeek(false);
+                SetCompact(false);
+            };
             sp.Children.Add(dot);
             notchRing.HorizontalAlignment = HorizontalAlignment.Center;
             notchRing.VerticalAlignment = VerticalAlignment.Center;
@@ -5793,6 +6406,7 @@ namespace SlideDock
         void SetCompact(bool c)
         {
             if (c == compact) return;
+            if (c) ResetPeek();
             compact = c;
             Border show = c ? notch : fullCard;
             Border hide = c ? fullCard : notch;
@@ -5807,7 +6421,6 @@ namespace SlideDock
             foreach (Border b in new Border[] { show, hide })
             {
                 b.BeginAnimation(UIElement.OpacityProperty, null);
-                b.RenderTransform = Transform.Identity;
                 b.Opacity = 1;
             }
             if (!ready)
@@ -5915,19 +6528,141 @@ namespace SlideDock
             }
         }
 
+        // kursor mendekati notch: notch memanjang sedikit lalu terus pelan seperti "loading"; bila kursor
+        // bertahan selama PeekDwell baru berubah jadi dock penuh. Kursor yang hanya lewat tidak membuka dock,
+        // dan selama jeda app di notch bisa langsung diklik (klik = jeda diulang dari awal).
+        const double PeekDwell = 750;
+        DateTime peekSince = DateTime.MinValue;
+        POINT peekStartAt, peekHoldAt;
+        bool peekHold;
+
+        static double Moved(POINT a, POINT b) { return Math.Max(Math.Abs(a.X - b.X), Math.Abs(a.Y - b.Y)); }
+
         void HoverPoll()
         {
             if (hiddenForFullscreen) return;
+            if (dragArmed || dragging) { lastNear = DateTime.Now; return; }
             bool menu = MenuOpen();
             bool popup = AnyPopupOpen != null && AnyPopupOpen();
-            if (CursorNear() || popup || menu || preview.Showing)   // dock penuh hanya saat ada interaksi; selain itu notch
+            if (preview.Showing && previewFromNotch && compact)     // pratinjau dari notch: notch tetap kecil
             {
                 lastNear = DateTime.Now;
+                EndPeek(true);
+                return;
+            }
+            if (popup || menu || preview.Showing)                   // dock penuh hanya saat ada interaksi; selain itu notch
+            {
+                lastNear = DateTime.Now;
+                EndPeek(false);
                 SetCompact(false);
                 return;
             }
+            if (CursorNear())
+            {
+                lastNear = DateTime.Now;
+                if (compact)
+                {
+                    // di atas ikon app notch: pratinjau/klik app, bukan membuka dock (loading hanya di bagian kosong).
+                    // Status hanya berubah bila KURSOR yang bergerak: saat notch membesar ikon bisa bergeser ke bawah
+                    // kursor yang diam, dan itu tidak boleh membatalkan loading (sebelumnya notch jadi besar-kecil terus).
+                    POINT cp;
+                    GetCursorPos(out cp);
+                    bool overApp = CursorOverNotchApp();
+                    if (peekSince == DateTime.MinValue)
+                    {
+                        if (overApp) return;
+                        if (peekHold && Moved(cp, peekHoldAt) < 6) return;   // baru dibatalkan: tunggu kursor bergerak dulu
+                        peekHold = false;
+                        peekSince = DateTime.Now;
+                        peekStartAt = cp;
+                        Peek(true);
+                        collapseTimer.Interval = TimeSpan.FromMilliseconds(40);   // cek lebih sering selama jeda
+                    }
+                    else if (overApp && Moved(cp, peekStartAt) >= 6)
+                    {
+                        EndPeek(true);                              // kursor sengaja pindah ke ikon app
+                        peekHold = true;
+                        peekHoldAt = cp;
+                        return;
+                    }
+                    if ((DateTime.Now - peekSince).TotalMilliseconds < PeekDwell) return;
+                }
+                EndPeek(false);
+                SetCompact(false);
+                return;
+            }
+            EndPeek(true);                                          // kursor pergi sebelum jeda habis: notch kembali
+            peekHold = false;
             if (!Prefs.Notch) SetCompact(false);                       // notch dimatikan: dock selalu penuh
             else if ((DateTime.Now - lastNear).TotalMilliseconds > 700) SetCompact(true);
+        }
+
+        void EndPeek(bool shrink)
+        {
+            if (peekSince == DateTime.MinValue) return;
+            peekSince = DateTime.MinValue;
+            collapseTimer.Interval = TimeSpan.FromMilliseconds(150);
+            if (shrink) Peek(false);
+        }
+
+        // jarak notch memanjang (menjauh dari tepi layar), 0..1 dianimasikan
+        const double PeekGrow = 10;        // menjauh dari tepi layar
+        const double PeekWiden = 20;       // ke masing-masing samping
+        double peekAmt;
+        int peekGen;
+        Thickness notchContentBase;
+
+        FrameworkElement NotchContent()
+        {
+            Grid g = notch.Child as Grid;
+            return g != null && g.Children.Count > 1 ? g.Children[1] as FrameworkElement : null;
+        }
+
+        void ApplyPeek(double a)
+        {
+            peekAmt = a;
+            FrameworkElement c = NotchContent();
+            if (c == null) return;
+            Thickness b = notchContentBase;
+            double d = PeekGrow * a, w = PeekWiden * a;
+            // notch digeser ke pinggir (f = -1..1): pelebaran lebih banyak ke arah tengah layar, sehingga tepi
+            // luar tetap di pojok DAN ikon app tidak bergeser (sebelumnya ikon bisa pindah ke bawah kursor)
+            double f = Math.Max(-1, Math.Min(1, slideCur));
+            double lo = w * (1 + f), hi = w * (1 - f);          // sisi kiri/atas, sisi kanan/bawah
+            // isi tetap di tempat; bentuk notch memanjang ke dalam layar dan melebar ke kedua sisi
+            if (Layout.Side == 1) c.Margin = new Thickness(b.Left, b.Top + lo, b.Right + d, b.Bottom + hi);
+            else if (Layout.Side == 2) c.Margin = new Thickness(b.Left + d, b.Top + lo, b.Right, b.Bottom + hi);
+            else c.Margin = new Thickness(b.Left + lo, b.Top + d, b.Right + hi, b.Bottom);
+        }
+
+        void Peek(bool on)
+        {
+            double from = peekAmt, to = on ? 1 : 0;
+            if (Math.Abs(from - to) < 0.001) return;
+            int gen = ++peekGen;
+            // membuka: cepat ke 70% (terasa responsif), lalu pelan sampai penuh tepat saat jeda habis
+            double ms = on ? PeekDwell : 150, quick = 160 / PeekDwell;
+            AnimClock clock = new AnimClock();
+            EventHandler step = null;
+            step = delegate
+            {
+                if (gen != peekGen) { CompositionTarget.Rendering -= step; return; }
+                double k = Clamp01(clock.Tick() / ms);
+                double e;
+                if (!on) e = 1 - Math.Pow(1 - k, 3);
+                else if (k < quick) { double u = k / quick; e = 0.7 * (1 - (1 - u) * (1 - u)); }
+                else e = 0.7 + 0.3 * (k - quick) / (1 - quick);
+                ApplyPeek(from + (to - from) * e);
+                if (k >= 1) CompositionTarget.Rendering -= step;
+            };
+            CompositionTarget.Rendering += step;
+        }
+
+        // langsung ke ukuran normal (tanpa animasi): dipakai sebelum dock kembali menjadi notch
+        void ResetPeek()
+        {
+            ++peekGen;
+            if (peekAmt != 0) { ApplyPeek(0); notch.UpdateLayout(); }
         }
         static ImageSource IconOf(DockItem it)
         {
@@ -6022,6 +6757,9 @@ namespace SlideDock
             return t;
         }
 
+        readonly Border updateDot = new Border();
+        public void SetUpdateDot(bool on) { updateDot.Visibility = on ? Visibility.Visible : Visibility.Collapsed; }
+
         FrameworkElement MakeStart()
         {
             Border t = NewTile();
@@ -6040,7 +6778,21 @@ namespace SlideDock
                 d.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
                 g.Children.Add(d);
             }
-            t.Child = g;
+            Grid sg = new Grid();
+            sg.Children.Add(g);
+            updateDot.Width = 8;
+            updateDot.Height = 8;
+            updateDot.CornerRadius = new CornerRadius(4);
+            updateDot.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
+            updateDot.BorderBrush = new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x1C));
+            updateDot.BorderThickness = new Thickness(1.5);
+            updateDot.HorizontalAlignment = HorizontalAlignment.Right;
+            updateDot.VerticalAlignment = VerticalAlignment.Top;
+            updateDot.Margin = new Thickness(0, 9, 7, 0);
+            updateDot.Visibility = Visibility.Collapsed;
+            updateDot.IsHitTestVisible = false;
+            sg.Children.Add(updateDot);
+            t.Child = sg;
             UI.Tip(t, "Start  ·  right-click for SlideDock options");
             AttachDockMenu(t);
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; if (OnToggle != null) OnToggle(); };
@@ -6141,18 +6893,80 @@ namespace SlideDock
         }
 
         // tengah ikon status (koordinat layar) agar popup muncul tepat di atasnya
-        public double StatusCenter(string mode)
+        public Point StatusCenter(string mode)
         {
             Border t = mode == "wifi" ? netTile : mode == "sound" ? volTile : mode == "battery" ? batTile : statusTile;
             if (t == null || t.ActualWidth <= 0) t = statusTile;
-            Point p = t.TranslatePoint(new Point(t.ActualWidth / 2, 0), this);
-            return Left + p.X;
+            return CenterOnScreen(t);
+        }
+
+        // tengah elemen dock dalam koordinat layar (DIP), sudah termasuk skala & geser dock
+        Point CenterOnScreen(FrameworkElement e)
+        {
+            Point p = e.TranslatePoint(new Point(e.ActualWidth / 2, e.ActualHeight / 2), this);
+            return new Point(Left + p.X, Top + p.Y);
+        }
+
+        public Point ClockCenter() { return CenterOnScreen(clockTile); }
+
+        // kotak dock penuh di layar (DIP): patokan posisi popup
+        public Rect SurfaceRect()
+        {
+            if (fullCard == null || fullCard.ActualWidth <= 0) return Rect.Empty;
+            Point a = fullCard.TranslatePoint(new Point(0, 0), this);
+            Point b = fullCard.TranslatePoint(new Point(fullCard.ActualWidth, fullCard.ActualHeight), this);
+            return new Rect(new Point(Left + a.X, Top + a.Y), new Point(Left + b.X, Top + b.Y));
         }
         Border trayTile;
         readonly PreviewWindow preview = new PreviewWindow();
         readonly DispatcherTimer previewTimer = new DispatcherTimer();
         DockItem pendingItem;
-        Border pendingTile;
+        FrameworkElement pendingTile;
+        bool previewFromNotch;
+        FrameworkElement dragHoverEl;
+
+        // ikon app (dock penuh atau notch) di titik p (koordinat jendela)
+        FrameworkElement AppAt(Point p)
+        {
+            Panel panel = compact ? (Panel)notchApps : itemsPanel;
+            foreach (UIElement c in panel.Children)
+            {
+                FrameworkElement fe = c as FrameworkElement;
+                if (fe == null || !(fe.DataContext is DockItem) || !fe.IsVisible) continue;
+                Point o = fe.TranslatePoint(new Point(0, 0), this);
+                Point b = fe.TranslatePoint(new Point(fe.ActualWidth, fe.ActualHeight), this);
+                if (new Rect(o, b).Contains(p)) return fe;
+            }
+            return null;
+        }
+
+        bool CursorOverNotchApp()
+        {
+            POINT c;
+            if (!compact || hwnd == IntPtr.Zero || !GetCursorPos(out c)) return false;
+            try { return AppAt(PointFromScreen(new Point(c.X, c.Y))) != null; }
+            catch { return false; }
+        }
+
+        // file diseret dari Explorer ke atas ikon app: tampilkan pratinjau jendelanya (tanpa membuka dock)
+        void DragHover(DragEventArgs e)
+        {
+            FrameworkElement el = AppAt(e.GetPosition(this));
+            if (el == null)
+            {
+                if (dragHoverEl != null) { dragHoverEl = null; previewTimer.Stop(); }
+                return;                                   // area lain: perilaku lama (lepas = sematkan ke dock)
+            }
+            e.Effects = DragDropEffects.None;             // ikon app bukan tempat menjatuhkan file
+            e.Handled = true;
+            if (el == dragHoverEl) return;
+            dragHoverEl = el;
+            DockItem it = el.DataContext as DockItem;
+            if (it == null || it.Wins.Count == 0) { previewTimer.Stop(); return; }
+            pendingItem = it;
+            pendingTile = el;
+            if (preview.Showing) ShowPreview(); else { previewTimer.Stop(); previewTimer.Start(); }
+        }
 
         static string ItemKey(DockItem it) { return (it.Lnk ?? "") + "|" + (it.Key ?? ""); }
 
@@ -6160,18 +6974,22 @@ namespace SlideDock
         {
             previewTimer.Stop();
             DockItem it = pendingItem;
-            Border t = pendingTile;
-            if (it == null || t == null || it.Wins.Count == 0 || !t.IsVisible || compact) return;
+            FrameworkElement t = pendingTile;
+            if (it == null || t == null || it.Wins.Count == 0 || !t.IsVisible) return;
+            bool fromNotch = notch.IsAncestorOf(t);
+            if (fromNotch != compact) return;             // notch sudah berubah jadi dock (atau sebaliknya)
+            FrameworkElement surface = fromNotch ? (FrameworkElement)notch : fullCard;
             Point tl = t.PointToScreen(new Point(0, 0));
             Point br = t.PointToScreen(new Point(t.ActualWidth, t.ActualHeight));
-            Point mid = t.TranslatePoint(new Point(t.ActualWidth / 2, 0), this);
+            Point mid = t.TranslatePoint(new Point(t.ActualWidth / 2, t.ActualHeight / 2), this);
             preview.Scr = ScreenDip;
             preview.ScrScale = Scale();
-            Point ttl = t.TranslatePoint(new Point(0, 0), this);
-            preview.CenterY = Top + ttl.Y + t.ActualHeight / 2;
-            Point cardL = fullCard.TranslatePoint(new Point(0, 0), this);
-            preview.SideX = Layout.Side == 1 ? Left + cardL.X + fullCard.ActualWidth : Left + cardL.X;
-            preview.ShowFor(ItemKey(it), new List<IntPtr>(it.Wins), IconOf(it), new Rect(tl, br), Left + mid.X, SurfaceTop);
+            preview.CenterY = Top + mid.Y;
+            Point sl = surface.TranslatePoint(new Point(0, 0), this);
+            Point sr = surface.TranslatePoint(new Point(surface.ActualWidth, 0), this);
+            preview.SideX = Layout.Side == 1 ? Left + sr.X : Left + sl.X;
+            previewFromNotch = fromNotch;
+            preview.ShowFor(ItemKey(it), new List<IntPtr>(it.Wins), IconOf(it), new Rect(tl, br), Left + mid.X, Top + sl.Y);
         }
 
         public Func<List<KeyValuePair<string, Action>>> MenuProvider;
@@ -6208,6 +7026,7 @@ namespace SlideDock
 
         public double TrayLeft()
         {
+            if (trayTile == null) return Left + ActualWidth / 2;          // tile tray tidak lagi dipasang di dock
             Point p = trayTile.TranslatePoint(new Point(0, 0), this);
             return Left + p.X;
         }
@@ -6342,6 +7161,7 @@ namespace SlideDock
             };
             t.MouseLeave += delegate { previewTimer.Stop(); };
             t.PreviewMouseDown += delegate { previewTimer.Stop(); preview.HidePreview(); };
+            t.DataContext = it;
             Grid g = new Grid();
             Image img = new Image();
             img.Width = 30;
@@ -6591,13 +7411,41 @@ namespace SlideDock
             {
                 Grid ng = new Grid();
                 ng.Margin = Layout.V ? new Thickness(0, 3, 0, 3) : new Thickness(3, 0, 3, 0);
-                ng.ToolTip = it.Name;
+                UI.Tip(ng, it.Name);
                 Image im = new Image();
                 im.Source = IconOf(it);
                 im.Width = 20;
                 im.Height = 20;
                 RenderOptions.SetBitmapScalingMode(im, BitmapScalingMode.HighQuality);
                 ng.Children.Add(im);
+                // app di notch bisa langsung diklik tanpa membuka dock
+                ng.Background = Brushes.Transparent;
+                ng.Cursor = Cursors.Hand;
+                ScaleTransform zs = new ScaleTransform(1, 1);
+                im.RenderTransformOrigin = new Point(0.5, 0.5);
+                im.RenderTransform = zs;
+                ng.MouseEnter += delegate { zs.ScaleX = 1.15; zs.ScaleY = 1.15; };
+                ng.MouseLeave += delegate { zs.ScaleX = 1; zs.ScaleY = 1; };
+                DockItem target = it;
+                ng.DataContext = it;
+                // hover ikon app di notch = pratinjau jendelanya, seperti di dock penuh (dock tidak terbuka)
+                ng.MouseEnter += delegate
+                {
+                    if (target.Wins.Count == 0) return;
+                    pendingItem = target;
+                    pendingTile = ng;
+                    if (preview.Showing) ShowPreview();
+                    else { previewTimer.Stop(); previewTimer.Start(); }
+                };
+                ng.MouseLeave += delegate { previewTimer.Stop(); };
+                ng.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    previewTimer.Stop();
+                    preview.HidePreview();
+                    Activate(target);
+                    EndPeek(true);
+                };
                 if (it.Active)
                 {
                     Border u = new Border();
@@ -6825,17 +7673,37 @@ namespace SlideDock
 
         static bool AutoStartOn()
         {
-            if (autoStartCache == null) autoStartCache = RunHidden("schtasks.exe", "/Query /TN \"" + TaskName + "\"") == 0;
+            if (AppInfo.Packaged) return PackagedStartup.On();
+            if (autoStartCache == null) autoStartCache = RunHidden("schtasks.exe", "/Query /TN \"" + TaskName + "\"") == 0 || RunKeyOn();
             return autoStartCache.Value;
+        }
+
+        static bool RunKeyOn()
+        {
+            try
+            {
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, false))
+                    return k != null && k.GetValue(RunName) != null;
+            }
+            catch { return false; }
         }
 
         static void SetAutoStart(bool on)
         {
-            // daftar Run lama tidak dipakai lagi (hindari dua cara start sekaligus)
+            if (AppInfo.Packaged) { PackagedStartup.Set(on); autoStartCache = null; return; }
+            // dua jalur: task saat sign-in (cepat) + daftar Startup Windows sebagai cadangan bila task gagal
+            // dibuat/dijalankan di PC lain (izin akun, kebijakan perusahaan, antivirus). Bila keduanya jalan,
+            // yang kedua melihat SlideDock sudah berjalan lalu keluar sendiri.
             try
             {
-                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, true))
-                    if (k != null) k.DeleteValue(RunName, false);
+                using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(RunKey))
+                {
+                    if (k != null)
+                    {
+                        if (on) k.SetValue(RunName, "\"" + System.Reflection.Assembly.GetExecutingAssembly().Location + "\" --autostart");
+                        else k.DeleteValue(RunName, false);
+                    }
+                }
             }
             catch { }
             if (!on)
@@ -6898,6 +7766,7 @@ namespace SlideDock
                     if (!got) { Log("another SlideDock is already running - exit"); return; }
                 }
                 bool restarting = false;
+                Updater.Cleanup();
 
                 Application app = new Application();
                 app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
@@ -6926,7 +7795,7 @@ namespace SlideDock
                 DockWindow dock = docks[0];
                 DockWindow cur = dock;
                 Action<DockWindow> wire = null;                                   // diisi di bawah
-                Action<DockWindow> use = delegate(DockWindow d) { cur = d; Popover.Scr = d.ScreenDip; Popover.SideGap = d.SurfaceExtent; };
+                Action<DockWindow> use = delegate(DockWindow d) { cur = d; Popover.Scr = d.ScreenDip; Popover.SideGap = d.SurfaceExtent; Popover.DockSpan = d.SurfaceRect(); };
                 Func<DockWindow> dockAtCursor = delegate
                 {
                     WF.Screen sc = WF.Screen.FromPoint(WF.Control.MousePosition);
@@ -6957,12 +7826,13 @@ namespace SlideDock
                     d.OnQuick = delegate(string mode)
                     {
                         use(d);
-                        double cx = d.StatusCenter(mode);
+                        Point cx = d.StatusCenter(mode);
                         // popup sudah terbuka untuk ikon lain: ganti isinya di tempat; ikon yang sama = tutup
                         if (quick.IsOpen && quick.Mode != mode) { foreach (DockWindow x in docks) x.HidePreview(); quick.Switch(mode, cx); return; }
                         if (switchTo(quick)) quick.ShowAt(mode, cx, d.SurfaceTop);
                     };
-                    d.OnClock = delegate { use(d); if (switchTo(cal)) cal.ShowAt(d.ClockRight(), d.SurfaceTop); };
+                    d.OnClock = delegate { use(d); if (switchTo(cal)) cal.ShowAt(d.ClockCenter(), d.SurfaceTop); };
+                    d.OnDockMoved = delegate(DockWindow moved) { foreach (DockWindow x in docks) if (x != moved) x.ApplySlide(true); };
                     d.OnTray = delegate { use(d); if (switchTo(trayPop)) trayPop.ShowAt(d.TrayLeft(), d.SurfaceTop); };
                     d.AnyPopupOpen = delegate { if (cur != d) return false; foreach (Popover p in pops) if (p.IsOpen) return true; return false; };
                 };
@@ -6972,6 +7842,22 @@ namespace SlideDock
                 WinKeyHook.Enabled = delegate { int st; return Native.SHQueryUserNotificationState(out st) != 0 || (st != 3 && st != 4); };
                 WinKeyHook.Install();
                 MenuCloser.Install();
+                // autostart lama (hanya task) diberi jalur cadangan daftar Startup tanpa perlu diatur ulang
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    // ...dan diperbarui bila file .exe dipindah ke folder lain (task/daftar lama menunjuk path lama)
+                    try
+                    {
+                        if (AppInfo.Packaged) return;
+                        string want = "\"" + System.Reflection.Assembly.GetExecutingAssembly().Location + "\" --autostart";
+                        string have = null;
+                        using (Microsoft.Win32.RegistryKey k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(RunKey, false))
+                            if (k != null) have = k.GetValue(RunName) as string;
+                        bool taskOn = RunHidden("schtasks.exe", "/Query /TN \"" + TaskName + "\"") == 0;
+                        if ((taskOn || have != null) && !string.Equals(have, want, StringComparison.OrdinalIgnoreCase)) SetAutoStart(true);
+                    }
+                    catch { }
+                });
 
                 // Desktop berubah -> panel & pin ikut berubah
                 List<FileSystemWatcher> watchers = new List<FileSystemWatcher>();
@@ -6997,7 +7883,8 @@ namespace SlideDock
                 app.Dispatcher.BeginInvoke(new Action(delegate { start.Prewarm(); }), DispatcherPriority.ApplicationIdle);
 
                 WF.NotifyIcon tray = new WF.NotifyIcon();
-                tray.Icon = DR.SystemIcons.Application;
+                try { tray.Icon = DR.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location); }
+                catch { tray.Icon = DR.SystemIcons.Application; }
                 tray.Text = "SlideDock";
                 tray.Visible = true;
                 Action<int> changeSide = null;                                   // diisi setelah menu dock dibuat
@@ -7103,6 +7990,46 @@ namespace SlideDock
                 };
                 foreach (DockWindow d in docks) d.MenuProvider = dockMenu;
 
+                // ----- update: cek otomatis (20 detik setelah mulai, lalu tiap 6 jam), notifikasi Windows sekali per versi -----
+                Action installUpdate = null;
+                installUpdate = delegate
+                {
+                    if (Updater.Available == null || Updater.Busy) return;
+                    string ver = Updater.Available.Ver.ToString(3);
+                    Updater.Install(app.Dispatcher,
+                        delegate { Log("updated to " + ver + ", restarting"); restartApp(); },
+                        delegate(string err)
+                        {
+                            Log("update failed: " + err);
+                            tray.ShowBalloonTip(8000, "SlideDock update failed", err + " The download page will open instead.", WF.ToolTipIcon.Warning);
+                            if (Updater.Available != null) Launcher.Open(Updater.Available.Page);
+                        });
+                };
+                start.OnUpdate = delegate { installUpdate(); };
+                tray.BalloonTipClicked += delegate { if (Updater.Available != null && !Updater.Busy) installUpdate(); };
+                Updater.Changed = delegate
+                {
+                    UpdateInfo u = Updater.Available;
+                    foreach (DockWindow d in docks) d.SetUpdateDot(u != null);
+                    start.RefreshUpdate();
+                    if (u == null || Updater.Busy) return;
+                    int code = u.Ver.Major * 1000000 + u.Ver.Minor * 1000 + u.Ver.Build;
+                    if (Prefs.Get("notified", 0) == code) return;
+                    Prefs.Set("notified", code);
+                    tray.ShowBalloonTip(10000, "SlideDock " + u.Ver.ToString(3) + " is available",
+                        "Click here to update now (you have " + AppInfo.Version + "). You can also update from Start.", WF.ToolTipIcon.Info);
+                };
+                if (Updater.Enabled)
+                {
+                    DispatcherTimer updTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+                    updTimer.Tick += delegate
+                    {
+                        updTimer.Interval = TimeSpan.FromHours(6);
+                        if (Updater.AutoCheck) Updater.Check(app.Dispatcher, null);
+                    };
+                    updTimer.Start();
+                }
+
                 // Dock settings di Start: tiap pilihan langsung berlaku
                 string[] themeKeys = new string[] { "glass", "dark", "aurora" };
                 start.SettingsProvider = delegate
@@ -7122,12 +8049,18 @@ namespace SlideDock
                             reopen.Tick += delegate { reopen.Stop(); use(dock); start.ShowSettings(dock.SurfaceTop); };
                             reopen.Start();
                         } });
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Dock size", Choices = new string[] { "Auto", "Small", "Medium", "Large" },
+                        Get = delegate { return Prefs.DockSize; },
+                        Set = delegate(int i) { Prefs.DockSize = i; foreach (DockWindow d in docks) d.ApplySize(); } });
                     l.Add(new DockSetting { Section = "Appearance", Label = "Magnify on hover", Choices = new string[] { "Off", "Subtle", "Strong" },
                         Get = delegate { return Prefs.Magnify; },
                         Set = delegate(int i) { Prefs.Magnify = i; } });
                     l.Add(new DockSetting { Section = "Behavior", Label = "Shrink to notch when idle", Toggle = true,
                         Get = delegate { return Prefs.Notch ? 1 : 0; },
                         Set = delegate(int i) { Prefs.Notch = i != 0; } });
+                    l.Add(new DockSetting { Section = "Behavior", Label = "Drag notch & dock along the edge", Toggle = true,
+                        Get = delegate { return Prefs.DockMove ? 1 : 0; },
+                        Set = delegate(int i) { Prefs.DockMove = i != 0; foreach (DockWindow d in docks) d.ApplySlide(true); } });
                     l.Add(new DockSetting { Section = "Behavior", Label = "Windows key opens Start", Toggle = true,
                         Get = delegate { return WinKeyHook.Active ? 1 : 0; },
                         Set = delegate(int i) { setWinKey(i != 0); } });
@@ -7137,6 +8070,27 @@ namespace SlideDock
                     l.Add(new DockSetting { Section = "Behavior", Label = "Start with Windows", Toggle = true,
                         Get = delegate { return AutoStartOn() ? 1 : 0; },
                         Set = delegate(int i) { SetAutoStart(i != 0); auto.Checked = AutoStartOn(); } });
+                    if (!Updater.Enabled)
+                        l.Add(new DockSetting { Section = "Updates", Label = "Version " + AppInfo.Version + "  ·  updates come from Microsoft Store",
+                            Click = delegate { Launcher.Open("ms-windows-store://downloadsandupdates"); } });
+                    else
+                    {
+                        UpdateInfo av = Updater.Available;
+                        if (av != null)
+                            l.Add(new DockSetting { Section = "Updates", Label = Updater.Busy ? "Downloading " + av.Ver.ToString(3) + "..." : "Install update " + av.Ver.ToString(3) + " (you have " + AppInfo.Version + ")",
+                                Click = delegate { installUpdate(); } });
+                        l.Add(new DockSetting { Section = "Updates",
+                            Label = Updater.Checking ? "Checking for updates..." :
+                                    av == null && Updater.LastCheck > DateTime.MinValue && Updater.LastError == null ? "Version " + AppInfo.Version + "  ·  up to date. Check again" :
+                                    Updater.LastError != null ? "Version " + AppInfo.Version + "  ·  couldn't check. Try again" :
+                                    "Version " + AppInfo.Version + "  ·  check for updates",
+                            Click = delegate { Updater.Check(app.Dispatcher, null); start.RefreshUpdate(); } });
+                        l.Add(new DockSetting { Section = "Updates", Label = "Check for updates automatically", Toggle = true,
+                            Get = delegate { return Updater.AutoCheck ? 1 : 0; },
+                            Set = delegate(int i) { Updater.AutoCheck = i != 0; } });
+                        l.Add(new DockSetting { Section = "Updates", Label = "Release notes",
+                            Click = delegate { start.HidePanel(); Launcher.Open(AppInfo.ReleasesPage); } });
+                    }
                     l.Add(new DockSetting { Section = "More", Label = "Open settings folder",
                         Click = delegate { start.HidePanel(); Process.Start("explorer.exe", Store.Dir); } });
                     l.Add(new DockSetting { Section = "More", Label = "Exit SlideDock (restore taskbar)",
@@ -7229,10 +8183,22 @@ namespace SlideDock
                 AppDomain.CurrentDomain.UnhandledException += delegate { WinKeyHook.Uninstall(); TaskbarCtl.Restore(); };
                 Log("running: " + docks.Count + " dock(s), position " + Layout.Side);
                 // error di tampilan: catat ke log, app tetap jalan (taskbar tidak "hilang")
+                // error yang sama (mis. dari animasi per frame) dicatat paling sering sekali per menit, file maks ~500 KB
+                Dictionary<string, DateTime> lastErr = new Dictionary<string, DateTime>();
                 app.DispatcherUnhandledException += delegate(object s, DispatcherUnhandledExceptionEventArgs e)
                 {
-                    try { File.AppendAllText(System.IO.Path.Combine(Store.Dir, "error.log"), DateTime.Now + "  " + e.Exception + Environment.NewLine + Environment.NewLine); } catch { }
                     e.Handled = true;
+                    try
+                    {
+                        string key = e.Exception.GetType().Name + "|" + e.Exception.Message + "|" + (e.Exception.StackTrace ?? "").Split('\n')[0];
+                        DateTime prev;
+                        if (lastErr.TryGetValue(key, out prev) && (DateTime.Now - prev).TotalSeconds < 60) return;
+                        lastErr[key] = DateTime.Now;
+                        string f = System.IO.Path.Combine(Store.Dir, "error.log");
+                        if (File.Exists(f) && new FileInfo(f).Length > 500000) File.Delete(f);
+                        File.AppendAllText(f, DateTime.Now + "  v" + AppInfo.Version + "  " + e.Exception + Environment.NewLine + Environment.NewLine);
+                    }
+                    catch { }
                 };
                 if (!dock.HotkeyOk)
                     tray.ShowBalloonTip(5000, "SlideDock", "Win+Alt+Space is already used by another app.", WF.ToolTipIcon.Warning);
