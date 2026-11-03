@@ -40,7 +40,7 @@ $refs = @(
   "$wpf\PresentationFramework.dll", "$wpf\PresentationCore.dll", "$wpf\WindowsBase.dll",
   "$fw\System.Xaml.dll", "$fw\System.Windows.Forms.dll", "$fw\System.Drawing.dll",
   "$fw\System.Core.dll", "$fw\System.Data.dll", "$fw\System.Management.dll", "$fw\System.dll",
-  "$fw\System.Runtime.WindowsRuntime.dll", "$fw\System.Runtime.dll", "$fw\System.Web.Extensions.dll"
+  "$fw\System.Runtime.WindowsRuntime.dll", "$fw\System.Runtime.dll", "$fw\System.Web.Extensions.dll", "$fw\System.Security.dll"
 )
 
 # Windows Runtime metadata (notifications API): use the Windows SDK if installed,

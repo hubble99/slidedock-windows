@@ -28,7 +28,8 @@ Updating downloads the new `SlideDock.exe`, checks its SHA-256 checksum, swaps t
 - **Search** for apps, files and the web
 - **Status icons**: Wi‑Fi, volume and a battery ring (blue bolt while charging); each icon opens its own panel (Wi‑Fi list, volume, battery), scroll on the volume icon to change volume
 - **Quick Settings**: brightness, volume, Wi‑Fi list and connect
-- **Calendar + notifications** (dismiss one or clear all)
+- **Calendar + notifications** (dismiss one or clear all). Click a date to see that day: public holidays for your country (taken from Windows *Country or region*, shown as red dates, names in the local language or English), observances, and your Google Calendar events. **Open in Google Calendar** and **+ Event** open that day in your browser
+- **Google Calendar (read-only)**: paste your calendar's *Secret address in iCal format* in Dock settings → Calendar. Events show as blue dots and in the day panel; the link is stored encrypted for your Windows account. Works with any iCal link (Outlook, iCloud)
 - **Themes**: Glass (frosted blur), Dark, or Aurora (frosted glass with a purple-to-teal glow)
 - **Dock settings** in Start: theme, position, dock size (Auto picks a smaller dock on small screens), magnify strength, drag the notch or dock along its edge (the dock opens from wherever the notch sits), notch, Windows key, taskbar, start with Windows, updates. Changes apply right away
 - **Position**: bottom, left or right; one dock per monitor, per‑monitor DPI. Popups (Start, calendar, status panels) open next to the dock wherever it is
@@ -50,6 +51,12 @@ Double-click `SlideDock.exe`. The Windows taskbar is hidden while SlideDock runs
 - Start with Windows (creates a Task Scheduler task named "SlideDock" that runs at sign-in, plus a Startup-apps entry as a backup in case the task can't run on that PC)
 - Open settings folder
 - **Exit SlideDock (restore taskbar)**: closes the dock and brings the normal taskbar back
+
+## Uninstall
+
+Use **Dock settings → More → Uninstall SlideDock** (or right-click the SlideDock tray icon → **Uninstall SlideDock...**). It puts the Windows taskbar back exactly as it was before SlideDock (visible on every monitor, auto-hide and other taskbar settings restored), removes "Start with Windows", then deletes `SlideDock.exe` and `%APPDATA%\SlideDock`. In the Microsoft Store version it restores the taskbar and opens **Installed apps** so you can remove it there.
+
+If you remove the Store version straight from Windows Settings while it's running, SlideDock notices Windows closing it and restores the taskbar too. If you just delete `SlideDock.exe` after shutting Windows down with SlideDock running, the taskbar may stay on auto-hide: turn it off in Settings → Personalization → Taskbar → Taskbar behaviors, or run SlideDock once and use Uninstall.
 
 ## Settings
 

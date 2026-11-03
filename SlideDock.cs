@@ -1226,11 +1226,38 @@ namespace SlideDock
         // sudah tersembunyi sebelum SlideDock berjalan. Hanya jendela taskbar yang ditampilkan lagi.
         public static void KeepHiddenForNextLogin()
         {
+            if (Releasing) return;
             SetAutoHide(true);
+        }
+
+        // SlideDock dilepas untuk seterusnya (uninstall, atau Windows menutup app untuk uninstall/update paket):
+        // jangan sisakan auto-hide untuk login berikutnya
+        public static bool Releasing;
+
+        // kembalikan taskbar Windows seperti sebelum SlideDock dipakai: semua taskbar tampil, auto-hide &
+        // pengaturan lain sesuai aslinya (tanpa catatan asli: auto-hide dimatikan, bawaan Windows)
+        public static void RestoreDefaults()
+        {
+            Releasing = true;
+            HideEnabled = false;
+            ShowAll();
+            IntPtr tray = Native.FindWindow("Shell_TrayWnd", null);
+            if (tray != IntPtr.Zero)
+            {
+                APPBARDATA d = new APPBARDATA();
+                d.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
+                d.hWnd = tray;
+                int orig = prev >= 0 ? prev : LoadOriginal();
+                if (orig < 0) orig = (int)Native.SHAppBarMessage(4, ref d) & ~1;
+                d.lParam = (IntPtr)orig;
+                Native.SHAppBarMessage(0xA, ref d);
+            }
+            try { if (File.Exists(OrigFile)) File.Delete(OrigFile); } catch { }
         }
 
         public static void Apply()
         {
+            if (Releasing) return;
             SetAutoHide(true);
             if (HideEnabled) foreach (IntPtr t in Trays()) Native.ShowWindow(t, 0);
         }
@@ -1628,6 +1655,20 @@ namespace SlideDock
             SizeChanged += delegate
             {
                 if (!IsOpen || anchorBottom < 0) return;
+                if (slidePending)
+                {
+                    // ukuran berubah sebelum animasi buka dimulai (mis. isi baru dimuat saat dibuka ulang):
+                    // perbarui tujuan animasi, jangan meluncur ke posisi lama yang dihitung dari ukuran lama
+                    Point np = Layout.V ? SidePoint(new Size(ActualWidth, ActualHeight)) : AnchoredPoint(slideTarget.X);
+                    slideTarget = np;
+                    Left = np.X;
+                    Top = np.Y;
+                    UpdateLayout();
+                    ApplySurface(false);
+                    Point f = SlideOffset(np, SlideDistance);
+                    MoveNow(f.X, f.Y);
+                    return;
+                }
                 BeginAnimation(Window.TopProperty, null);
                 ++glideGen;                   // ukuran berubah di tengah animasi: langsung ke posisi akhir
                 if (Layout.V)
@@ -1644,12 +1685,23 @@ namespace SlideDock
             };
         }
 
+        Point AnchoredPoint(double left)
+        {
+            if (anchorRight > 0) left = Math.Max(0, anchorRight - ActualWidth);
+            if (anchorCenter > 0) left = Math.Max(Scr.Left + 8, Math.Min(anchorCenter - ActualWidth / 2, Scr.Right - 8 - ActualWidth));
+            return new Point(left, anchorBottom - ActualHeight);
+        }
+
+        bool slidePending;                 // popup tampil, animasi buka belum mulai
+        Point slideTarget;
+
         void PlaceAnchored()
         {
             Top = anchorBottom - ActualHeight;
             if (anchorRight > 0) Left = Math.Max(0, anchorRight - ActualWidth);
             if (anchorCenter > 0) Left = Math.Max(Scr.Left + 8, Math.Min(anchorCenter - ActualWidth / 2, Scr.Right - 8 - ActualWidth));
             curPos = new Point(Left, Top);
+            if (slidePending) slideTarget = curPos;
             UpdateLayout();
             ApplySurface(false);
         }
@@ -1667,6 +1719,7 @@ namespace SlideDock
                 Left = sp.X;
                 Top = sp.Y;
                 curPos = sp;
+                if (slidePending) slideTarget = sp;
                 UpdateLayout();
                 ApplySurface(false);
                 return;
@@ -1851,6 +1904,8 @@ namespace SlideDock
             // geser masuk dari arah dock (bawah, atau samping untuk dock kiri/kanan), tanpa fade:
             // memudarkan jendela transparan memaksa seluruh panel digambar ulang tiap frame, menggeser jendela murah.
             Point from = SlideOffset(p, SlideDistance);
+            slideTarget = p;
+            slidePending = true;
             MoveNow(from.X, from.Y);          // frame pertama sudah di titik awal (tidak melompat dari posisi akhir)
             Opacity = 1;
             Activate();
@@ -1862,8 +1917,10 @@ namespace SlideDock
             {
                 if (++ticks < 2) return;
                 CompositionTarget.Rendering -= onFrame;
-                if (closing || !IsVisible || gen != openGen) return;
-                Glide(from, p, 260, false, null);
+                if (gen != openGen) return;
+                slidePending = false;
+                if (closing || !IsVisible) return;
+                Glide(SlideOffset(slideTarget, SlideDistance), slideTarget, 260, false, null);
             };
             CompositionTarget.Rendering += onFrame;
         }
@@ -1924,6 +1981,7 @@ namespace SlideDock
             if (!IsOpen) return;
             HiddenAt = DateTime.Now;
             closing = true;
+            slidePending = false;
             ++openGen;
             BeginAnimation(Window.TopProperty, null);
             BeginAnimation(Window.OpacityProperty, null);
@@ -2767,6 +2825,9 @@ namespace SlideDock
         public Func<int> Get;
         public Action<int> Set;
         public Action Click;
+        public bool Input;                     // kotak teks + Save (mis. link kalender)
+        public string Placeholder;
+        public Action<string> SetText;
     }
 
     class StartWindow : Popover
@@ -3349,6 +3410,7 @@ namespace SlideDock
 
         FrameworkElement SettingRow(DockSetting s)
         {
+            if (s.Input) return InputRow(s);
             Border row = new Border();
             row.CornerRadius = new CornerRadius(12);
             row.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255));
@@ -3380,6 +3442,13 @@ namespace SlideDock
                 g.Children.Add(chev);
                 Action click = s.Click;
                 row.MouseLeftButtonUp += delegate { click(); };
+                return row;
+            }
+            if (!s.Toggle && s.Choices == null)
+            {
+                label.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));   // baris info saja
+                label.TextWrapping = TextWrapping.Wrap;
+                label.FontSize = 12;
                 return row;
             }
             int cur = s.Get != null ? s.Get() : 0;
@@ -3421,6 +3490,75 @@ namespace SlideDock
             g.Children.Add(ctl);
             return row;
         }
+
+        FrameworkElement InputRow(DockSetting s)
+        {
+            Border row = new Border();
+            row.CornerRadius = new CornerRadius(12);
+            row.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255));
+            row.Padding = new Thickness(14, 10, 10, 10);
+            row.Margin = new Thickness(0, 0, 0, 4);
+            StackPanel col = new StackPanel();
+            TextBlock label = new TextBlock();
+            label.Text = s.Label;
+            label.Foreground = Brushes.White;
+            label.FontSize = 13;
+            label.FontFamily = UI.Text;
+            label.Margin = new Thickness(0, 0, 0, 8);
+            col.Children.Add(label);
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            Border box = new Border();
+            box.CornerRadius = new CornerRadius(8);
+            box.Background = new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255));
+            box.Padding = new Thickness(8, 5, 8, 5);
+            Grid inner = new Grid();
+            TextBox tb = new TextBox();
+            tb.Background = Brushes.Transparent;
+            tb.BorderThickness = new Thickness(0);
+            tb.Foreground = Brushes.White;
+            tb.CaretBrush = Brushes.White;
+            tb.FontSize = 12.5;
+            tb.FontFamily = UI.Text;
+            TextBlock hint = new TextBlock();
+            hint.Text = s.Placeholder ?? "";
+            hint.Foreground = new SolidColorBrush(Color.FromArgb(0x70, 255, 255, 255));
+            hint.FontSize = 12.5;
+            hint.FontFamily = UI.Text;
+            hint.IsHitTestVisible = false;
+            hint.Margin = new Thickness(2, 0, 0, 0);
+            hint.VerticalAlignment = VerticalAlignment.Center;
+            hint.TextTrimming = TextTrimming.CharacterEllipsis;
+            tb.TextChanged += delegate { hint.Visibility = tb.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed; };
+            inner.Children.Add(tb);
+            inner.Children.Add(hint);
+            box.Child = inner;
+            g.Children.Add(box);
+            Border save = new Border();
+            save.CornerRadius = new CornerRadius(8);
+            save.Padding = new Thickness(14, 5, 14, 6);
+            save.Margin = new Thickness(8, 0, 0, 0);
+            save.Cursor = Cursors.Hand;
+            save.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
+            TextBlock st = new TextBlock();
+            st.Text = "Save";
+            st.FontSize = 12.5;
+            st.FontWeight = FontWeights.SemiBold;
+            st.FontFamily = UI.Text;
+            st.Foreground = Brushes.Black;
+            save.Child = st;
+            Action go = delegate { if (tb.Text.Trim().Length > 0 && s.SetText != null) s.SetText(tb.Text); };
+            save.MouseLeftButtonUp += delegate { go(); };
+            tb.KeyDown += delegate(object o, KeyEventArgs e) { if (e.Key == Key.Enter) { e.Handled = true; go(); } };
+            Grid.SetColumn(save, 1);
+            g.Children.Add(save);
+            col.Children.Add(g);
+            row.Child = col;
+            return row;
+        }
+
+        public void RefreshSettings() { if (settingsMode && IsOpen) RenderSettings(); }
 
         static FrameworkElement Switch(bool on, Action toggle)
         {
@@ -4073,6 +4211,7 @@ namespace SlideDock
         List<WifiNet> last = new List<WifiNet>();
         string expanded;
         string message;
+        string busySsid;                // jaringan yang sedang connect/disconnect
 
         public WifiPanel()
         {
@@ -4101,13 +4240,20 @@ namespace SlideDock
             status.FontFamily = UI.Text;
             status.TextWrapping = TextWrapping.Wrap;
             status.Margin = new Thickness(4, 2, 4, 8);
-            sp.Children.Add(status);
 
+            // tinggi tetap: panel tidak memanjang saat daftar jaringan muncul, jadi popup tidak melompat
+            // (dock kiri/kanan di bawah layar: dulu turun melewati layar lalu naik lagi)
+            Grid body = new Grid();
+            body.Height = 340;
+            body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            body.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            body.Children.Add(status);
             ScrollViewer sv = new ScrollViewer();
             sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            sv.MaxHeight = 360;
             sv.Content = list;
-            sp.Children.Add(sv);
+            Grid.SetRow(sv, 1);
+            body.Children.Add(sv);
+            sp.Children.Add(body);
 
             Border settings = new Border();
             settings.CornerRadius = new CornerRadius(10);
@@ -4148,27 +4294,6 @@ namespace SlideDock
             return b;
         }
 
-        static Border PillButton(string text, bool primary)
-        {
-            Border b = new Border();
-            b.CornerRadius = new CornerRadius(9);
-            b.Padding = new Thickness(14, 6, 14, 6);
-            b.Cursor = Cursors.Hand;
-            b.HorizontalAlignment = HorizontalAlignment.Right;
-            Color normal = primary ? Color.FromRgb(0x60, 0xCD, 0xFF) : Color.FromArgb(0x30, 255, 255, 255);
-            Color hover = primary ? Color.FromRgb(0x7D, 0xD8, 0xFF) : Color.FromArgb(0x48, 255, 255, 255);
-            b.Background = new SolidColorBrush(normal);
-            b.MouseEnter += delegate { b.Background = new SolidColorBrush(hover); };
-            b.MouseLeave += delegate { b.Background = new SolidColorBrush(normal); };
-            TextBlock t = new TextBlock();
-            t.Text = text;
-            t.FontSize = 12.5;
-            t.FontFamily = UI.Text;
-            t.Foreground = primary ? Brushes.Black : Brushes.White;
-            b.Child = t;
-            return b;
-        }
-
         public void Start()
         {
             expanded = null;
@@ -4202,20 +4327,45 @@ namespace SlideDock
             foreach (WifiNet n in nets) list.Children.Add(Row(n));
         }
 
+        // tombol bulat di samping nama jaringan: satu-satunya cara connect / disconnect
+        Border LinkButton(WifiNet n)
+        {
+            bool busy = busySsid == n.Ssid;
+            Border b = new Border();
+            b.Width = 30;
+            b.Height = 30;
+            b.CornerRadius = new CornerRadius(15);
+            b.Margin = new Thickness(8, 0, 0, 0);
+            b.VerticalAlignment = VerticalAlignment.Center;
+            b.Cursor = busy ? Cursors.Arrow : Cursors.Hand;
+            b.ToolTip = busy ? (n.Connected ? "Disconnecting..." : "Connecting...") : n.Connected ? "Disconnect" : "Connect";
+            Color normal = n.Connected ? Color.FromRgb(0x60, 0xCD, 0xFF) : Color.FromArgb(0x26, 255, 255, 255);
+            Color hover = n.Connected ? Color.FromRgb(0x7D, 0xD8, 0xFF) : Color.FromArgb(0x48, 255, 255, 255);
+            b.Background = new SolidColorBrush(normal);
+            if (!busy)
+            {
+                b.MouseEnter += delegate { b.Background = new SolidColorBrush(hover); };
+                b.MouseLeave += delegate { b.Background = new SolidColorBrush(normal); };
+            }
+            TextBlock g = UI.Glyph(busy ? "" : "", 14);
+            if (n.Connected) g.Foreground = Brushes.Black;
+            b.Child = g;
+            return b;
+        }
+
         FrameworkElement Row(WifiNet n)
         {
             StackPanel outer = new StackPanel();
             Border b = new Border();
             b.CornerRadius = new CornerRadius(10);
-            b.Padding = new Thickness(10, 7, 10, 7);
+            b.Padding = new Thickness(10, 6, 6, 6);
             b.Margin = new Thickness(0, 1, 0, 1);
-            b.Cursor = Cursors.Hand;
             bool open = expanded == n.Ssid;
             b.Background = open ? new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255)) : Brushes.Transparent;
-            if (!open) UI.Hover(b, 0x22);
             Grid g = new Grid();
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             string bars = n.Signal < 30 ? "" : n.Signal < 55 ? "" : n.Signal < 80 ? "" : "";
             TextBlock sig = UI.Glyph(bars, 16);
@@ -4223,6 +4373,7 @@ namespace SlideDock
             g.Children.Add(sig);
             StackPanel txt = new StackPanel();
             txt.Margin = new Thickness(10, 0, 0, 0);
+            txt.VerticalAlignment = VerticalAlignment.Center;
             TextBlock name = new TextBlock();
             name.Text = n.Ssid;
             name.Foreground = Brushes.White;
@@ -4243,65 +4394,83 @@ namespace SlideDock
             {
                 TextBlock lk = UI.Glyph("", 12);
                 lk.Opacity = 0.6;
+                lk.Margin = new Thickness(6, 0, 0, 0);
                 Grid.SetColumn(lk, 2);
                 g.Children.Add(lk);
             }
+            Border link = LinkButton(n);
+            Grid.SetColumn(link, 3);
+            g.Children.Add(link);
             b.Child = g;
-            b.MouseLeftButtonUp += delegate { expanded = open ? null : n.Ssid; Render(last); };
             outer.Children.Add(b);
 
-            if (open)
+            // jaringan baru yang berkunci: kotak kata sandi muncul di bawahnya, Enter atau ikon = connect
+            PasswordBox pw = null;
+            if (open && !n.Connected)
             {
                 StackPanel act = new StackPanel();
                 act.Margin = new Thickness(42, 4, 6, 8);
+                Border pwBox = new Border();
+                pwBox.CornerRadius = new CornerRadius(9);
+                pwBox.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+                pwBox.Padding = new Thickness(10, 6, 10, 6);
+                pw = new PasswordBox();
+                pw.Background = Brushes.Transparent;
+                pw.BorderThickness = new Thickness(0);
+                pw.Foreground = Brushes.White;
+                pw.CaretBrush = Brushes.White;
+                pw.FontSize = 13;
+                pw.ToolTip = "Network password";
+                pwBox.Child = pw;
+                act.Children.Add(pwBox);
+                TextBlock hint = new TextBlock();
+                hint.Text = "Type the password, then press Enter or the link icon";
+                hint.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+                hint.FontSize = 11;
+                hint.FontFamily = UI.Text;
+                hint.TextWrapping = TextWrapping.Wrap;
+                hint.Margin = new Thickness(2, 5, 0, 0);
+                act.Children.Add(hint);
+                outer.Children.Add(act);
+                PasswordBox pwRef = pw;
+                pw.KeyDown += delegate(object s, KeyEventArgs e)
+                {
+                    if (e.Key == Key.Enter && pwRef.Password.Length > 0) DoConnect(n, pwRef.Password);
+                    else if (e.Key == Key.Escape) { expanded = null; Render(last); e.Handled = true; }
+                };
+                Dispatcher.BeginInvoke(new Action(delegate { pwRef.Focus(); }), DispatcherPriority.Input);
+            }
+
+            PasswordBox pwFinal = pw;
+            link.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                if (busySsid != null) return;
                 if (n.Connected)
                 {
-                    Border dis = PillButton("Disconnect", false);
-                    dis.MouseLeftButtonUp += delegate
+                    busySsid = n.Ssid;
+                    Render(last);
+                    status.Text = "Disconnecting from " + n.Ssid + "...";
+                    ThreadPool.QueueUserWorkItem(delegate
                     {
-                        message = "Disconnected from " + n.Ssid;
-                        ThreadPool.QueueUserWorkItem(delegate { Wifi.Disconnect(); Thread.Sleep(1200); Dispatcher.BeginInvoke(new Action(Refresh)); });
-                    };
-                    act.Children.Add(dis);
+                        Wifi.Disconnect();
+                        Thread.Sleep(1200);
+                        Dispatcher.BeginInvoke(new Action(delegate { busySsid = null; message = "Disconnected from " + n.Ssid; Refresh(); }));
+                    });
+                    return;
                 }
-                else
-                {
-                    PasswordBox pw = null;
-                    if (!n.Known && !Wifi.IsOpen(n))
-                    {
-                        Border pwBox = new Border();
-                        pwBox.CornerRadius = new CornerRadius(9);
-                        pwBox.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
-                        pwBox.Padding = new Thickness(10, 6, 10, 6);
-                        pwBox.Margin = new Thickness(0, 0, 0, 8);
-                        pw = new PasswordBox();
-                        pw.Background = Brushes.Transparent;
-                        pw.BorderThickness = new Thickness(0);
-                        pw.Foreground = Brushes.White;
-                        pw.CaretBrush = Brushes.White;
-                        pw.FontSize = 13;
-                        pw.ToolTip = "Network password";
-                        pwBox.Child = pw;
-                        act.Children.Add(pwBox);
-                    }
-                    Border con = PillButton("Connect", true);
-                    PasswordBox pwRef = pw;
-                    Action go = delegate { DoConnect(n, pwRef != null ? pwRef.Password : null); };
-                    con.MouseLeftButtonUp += delegate { go(); };
-                    if (pw != null)
-                    {
-                        pw.KeyDown += delegate(object s, KeyEventArgs e) { if (e.Key == Key.Enter) go(); };
-                        Dispatcher.BeginInvoke(new Action(delegate { pwRef.Focus(); }), DispatcherPriority.Input);
-                    }
-                    act.Children.Add(con);
-                }
-                outer.Children.Add(act);
-            }
+                if (n.Known || Wifi.IsOpen(n)) { DoConnect(n, null); return; }
+                if (pwFinal != null && pwFinal.Password.Length > 0) { DoConnect(n, pwFinal.Password); return; }
+                expanded = open ? null : n.Ssid;    // minta kata sandi dulu
+                Render(last);
+            };
             return outer;
         }
 
         void DoConnect(WifiNet n, string password)
         {
+            busySsid = n.Ssid;
+            Render(last);
             status.Text = "Connecting to " + n.Ssid + "...";
             bool wasKnown = n.Known;
             ThreadPool.QueueUserWorkItem(delegate
@@ -4315,6 +4484,7 @@ namespace SlideDock
                 if (!ok && !wasKnown) Wifi.DeleteProfile(n.Ssid);   // kata sandi salah: profil baru dibuang
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
+                    busySsid = null;
                     message = ok ? "Connected to " + n.Ssid : (err ?? "Could not connect to " + n.Ssid + ". Check the password.");
                     if (ok) expanded = null;
                     Refresh();
@@ -4925,6 +5095,528 @@ namespace SlideDock
     }
 
     // ----- kalender -----
+    // ================= kalender: hari libur (menurut region Windows) & Google Calendar (link iCal) =================
+    class CalEvent
+    {
+        public string Uid, Title;
+        public DateTime Start, End;            // waktu lokal. Acara seharian: End = hari SETELAH hari terakhir
+        public bool AllDay, Cancelled;
+        public int Kind;                       // 0 = acara pribadi, 1 = libur nasional, 2 = perayaan
+        public string Rrule;
+        public List<DateTime> ExDates = new List<DateTime>();
+        public DateTime? RecurrenceId;
+    }
+
+    class DayItem { public string Title; public int Kind; public DateTime Start, End; public bool AllDay; }
+
+    // pembaca file iCal (.ics): cukup untuk kalender Google/Outlook/iCloud, termasuk acara berulang yang umum
+    static class Ics
+    {
+        public static List<CalEvent> Parse(string text, bool holidays)
+        {
+            List<CalEvent> all = new List<CalEvent>();
+            if (string.IsNullOrEmpty(text)) return all;
+            text = text.Replace("\r\n", "\n").Replace("\n ", "").Replace("\n\t", "");
+            CalEvent e = null;
+            string desc = null;
+            foreach (string raw in text.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                if (line == "BEGIN:VEVENT") { e = new CalEvent(); desc = null; continue; }
+                if (line == "END:VEVENT")
+                {
+                    if (e != null && e.Start != DateTime.MinValue)
+                    {
+                        if (e.End <= e.Start) e.End = e.AllDay ? e.Start.AddDays(1) : e.Start;
+                        // hari libur Google: "perayaan" punya deskripsi dua baris ("...untuk menyembunyikan..."),
+                        // libur nasional satu baris. Sama di semua bahasa.
+                        e.Kind = !holidays ? 0 : (desc != null && desc.Contains("\n") ? 2 : 1);
+                        all.Add(e);
+                    }
+                    e = null;
+                    continue;
+                }
+                if (e == null) continue;
+                int colon = ValueStart(line);
+                if (colon < 0) continue;
+                string head = line.Substring(0, colon), value = line.Substring(colon + 1);
+                int semi = head.IndexOf(';');
+                string name = (semi < 0 ? head : head.Substring(0, semi)).ToUpperInvariant();
+                string pars = semi < 0 ? "" : head.Substring(semi + 1);
+                bool allDay;
+                DateTime d;
+                switch (name)
+                {
+                    case "SUMMARY": e.Title = Unescape(value); break;
+                    case "DESCRIPTION": desc = Unescape(value); break;
+                    case "UID": e.Uid = value; break;
+                    case "STATUS": e.Cancelled = value.Trim().ToUpperInvariant() == "CANCELLED"; break;
+                    case "RRULE": e.Rrule = value; break;
+                    case "DTSTART": if (ParseDate(pars, value, out d, out allDay)) { e.Start = d; e.AllDay = allDay; } break;
+                    case "DTEND": if (ParseDate(pars, value, out d, out allDay)) e.End = d; break;
+                    case "DURATION": { TimeSpan ts; if (ParseDuration(value, out ts)) e.End = e.Start + ts; } break;
+                    case "RECURRENCE-ID": if (ParseDate(pars, value, out d, out allDay)) e.RecurrenceId = d; break;
+                    case "EXDATE":
+                        foreach (string part in value.Split(','))
+                            if (ParseDate(pars, part, out d, out allDay)) e.ExDates.Add(d);
+                        break;
+                }
+            }
+            // acara berulang yang satu kejadiannya diubah/dibatalkan: kejadian asli dikecualikan dari pola
+            Dictionary<string, CalEvent> masters = new Dictionary<string, CalEvent>();
+            foreach (CalEvent x in all) if (x.Rrule != null && x.Uid != null && !x.RecurrenceId.HasValue) masters[x.Uid] = x;
+            List<CalEvent> res = new List<CalEvent>();
+            foreach (CalEvent x in all)
+            {
+                CalEvent m;
+                if (x.RecurrenceId.HasValue && x.Uid != null && masters.TryGetValue(x.Uid, out m)) m.ExDates.Add(x.RecurrenceId.Value);
+                if (!x.Cancelled) res.Add(x);
+            }
+            return res;
+        }
+
+        static int ValueStart(string line)
+        {
+            bool q = false;
+            for (int i = 0; i < line.Length; i++)
+            {
+                if (line[i] == '"') q = !q;
+                else if (line[i] == ':' && !q) return i;
+            }
+            return -1;
+        }
+
+        static string Unescape(string v)
+        {
+            return v.Replace("\\n", "\n").Replace("\\N", "\n").Replace("\\,", ",").Replace("\\;", ";").Replace("\\\\", "\\").Trim();
+        }
+
+        static bool ParseDuration(string v, out TimeSpan ts)
+        {
+            ts = TimeSpan.Zero;
+            Match m = Regex.Match(v.Trim(), @"^([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$");
+            if (!m.Success) return false;
+            Func<int, int> g = delegate(int i) { return m.Groups[i].Success ? int.Parse(m.Groups[i].Value) : 0; };
+            ts = new TimeSpan(g(2) * 7 + g(3), g(4), g(5), g(6));
+            if (m.Groups[1].Value == "-") ts = ts.Negate();
+            return true;
+        }
+
+        // nama zona waktu IANA (dipakai Google) -> zona Windows
+        static readonly Dictionary<string, string> Iana = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Asia/Jakarta", "SE Asia Standard Time" }, { "Asia/Pontianak", "SE Asia Standard Time" },
+            { "Asia/Makassar", "Singapore Standard Time" }, { "Asia/Jayapura", "Tokyo Standard Time" },
+            { "Asia/Bangkok", "SE Asia Standard Time" }, { "Asia/Ho_Chi_Minh", "SE Asia Standard Time" }, { "Asia/Saigon", "SE Asia Standard Time" },
+            { "Asia/Singapore", "Singapore Standard Time" }, { "Asia/Kuala_Lumpur", "Singapore Standard Time" }, { "Asia/Manila", "Singapore Standard Time" },
+            { "Asia/Shanghai", "China Standard Time" }, { "Asia/Hong_Kong", "China Standard Time" }, { "Asia/Taipei", "Taipei Standard Time" },
+            { "Asia/Tokyo", "Tokyo Standard Time" }, { "Asia/Seoul", "Korea Standard Time" }, { "Asia/Kolkata", "India Standard Time" }, { "Asia/Calcutta", "India Standard Time" },
+            { "Asia/Dubai", "Arabian Standard Time" }, { "Asia/Riyadh", "Arab Standard Time" }, { "Asia/Karachi", "Pakistan Standard Time" }, { "Asia/Dhaka", "Bangladesh Standard Time" },
+            { "Europe/London", "GMT Standard Time" }, { "Europe/Dublin", "GMT Standard Time" }, { "Europe/Lisbon", "GMT Standard Time" },
+            { "Europe/Paris", "Romance Standard Time" }, { "Europe/Brussels", "Romance Standard Time" }, { "Europe/Madrid", "Romance Standard Time" },
+            { "Europe/Berlin", "W. Europe Standard Time" }, { "Europe/Amsterdam", "W. Europe Standard Time" }, { "Europe/Rome", "W. Europe Standard Time" },
+            { "Europe/Vienna", "W. Europe Standard Time" }, { "Europe/Zurich", "W. Europe Standard Time" }, { "Europe/Stockholm", "W. Europe Standard Time" },
+            { "Europe/Warsaw", "Central European Standard Time" }, { "Europe/Prague", "Central Europe Standard Time" }, { "Europe/Athens", "GTB Standard Time" },
+            { "Europe/Istanbul", "Turkey Standard Time" }, { "Europe/Moscow", "Russian Standard Time" }, { "Europe/Kiev", "FLE Standard Time" }, { "Europe/Kyiv", "FLE Standard Time" },
+            { "America/New_York", "Eastern Standard Time" }, { "America/Toronto", "Eastern Standard Time" }, { "America/Chicago", "Central Standard Time" },
+            { "America/Denver", "Mountain Standard Time" }, { "America/Phoenix", "US Mountain Standard Time" }, { "America/Los_Angeles", "Pacific Standard Time" },
+            { "America/Vancouver", "Pacific Standard Time" }, { "America/Mexico_City", "Central Standard Time (Mexico)" }, { "America/Sao_Paulo", "E. South America Standard Time" },
+            { "America/Argentina/Buenos_Aires", "Argentina Standard Time" }, { "America/Bogota", "SA Pacific Standard Time" }, { "America/Lima", "SA Pacific Standard Time" },
+            { "Australia/Sydney", "AUS Eastern Standard Time" }, { "Australia/Melbourne", "AUS Eastern Standard Time" }, { "Australia/Brisbane", "E. Australia Standard Time" },
+            { "Australia/Perth", "W. Australia Standard Time" }, { "Pacific/Auckland", "New Zealand Standard Time" },
+            { "Africa/Cairo", "Egypt Standard Time" }, { "Africa/Johannesburg", "South Africa Standard Time" }, { "Africa/Lagos", "W. Central Africa Standard Time" },
+            { "Africa/Nairobi", "E. Africa Standard Time" }, { "UTC", "UTC" }, { "Etc/UTC", "UTC" }, { "GMT", "UTC" }
+        };
+
+        static TimeZoneInfo Zone(string tzid)
+        {
+            if (string.IsNullOrEmpty(tzid)) return null;
+            tzid = tzid.Trim('"');
+            string win;
+            try { return TimeZoneInfo.FindSystemTimeZoneById(Iana.TryGetValue(tzid, out win) ? win : tzid); }
+            catch { return null; }
+        }
+
+        static bool ParseDate(string pars, string value, out DateTime d, out bool allDay)
+        {
+            d = DateTime.MinValue;
+            allDay = false;
+            value = value.Trim();
+            if (value.Length == 8 || pars.IndexOf("VALUE=DATE", StringComparison.OrdinalIgnoreCase) >= 0 && value.Length == 8)
+            {
+                allDay = true;
+                return DateTime.TryParseExact(value, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d);
+            }
+            bool utc = value.EndsWith("Z");
+            if (!DateTime.TryParseExact(value.TrimEnd('Z'), "yyyyMMdd'T'HHmmss", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return false;
+            if (utc) { d = DateTime.SpecifyKind(d, DateTimeKind.Utc).ToLocalTime(); d = DateTime.SpecifyKind(d, DateTimeKind.Unspecified); return true; }
+            Match tz = Regex.Match(pars, @"TZID=(""[^""]*""|[^;:]*)", RegexOptions.IgnoreCase);
+            TimeZoneInfo z = tz.Success ? Zone(tz.Groups[1].Value) : null;
+            if (z != null)
+            {
+                try { d = DateTime.SpecifyKind(TimeZoneInfo.ConvertTime(DateTime.SpecifyKind(d, DateTimeKind.Unspecified), z, TimeZoneInfo.Local), DateTimeKind.Unspecified); }
+                catch { }
+            }
+            return true;                                         // tanpa zona: waktu "mengambang" = waktu lokal
+        }
+
+        static readonly string[] DayCodes = { "SU", "MO", "TU", "WE", "TH", "FR", "SA" };
+
+        // kejadian acara yang bersinggungan dengan [from, to)
+        public static IEnumerable<KeyValuePair<DateTime, DateTime>> Occurrences(CalEvent e, DateTime from, DateTime to)
+        {
+            TimeSpan dur = e.End - e.Start;
+            if (e.Rrule == null)
+            {
+                if (e.Start < to && (e.End > from || e.Start >= from)) yield return new KeyValuePair<DateTime, DateTime>(e.Start, e.End);
+                yield break;
+            }
+            Dictionary<string, string> r = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string part in e.Rrule.Split(';'))
+            {
+                int eq = part.IndexOf('=');
+                if (eq > 0) r[part.Substring(0, eq).Trim()] = part.Substring(eq + 1).Trim();
+            }
+            string freq = r.ContainsKey("FREQ") ? r["FREQ"].ToUpperInvariant() : "";
+            int interval = 1, count = 0;
+            if (r.ContainsKey("INTERVAL")) int.TryParse(r["INTERVAL"], out interval);
+            if (interval < 1) interval = 1;
+            if (r.ContainsKey("COUNT")) int.TryParse(r["COUNT"], out count);
+            DateTime until = DateTime.MaxValue;
+            if (r.ContainsKey("UNTIL"))
+            {
+                DateTime u; bool ad;
+                if (ParseDate("", r["UNTIL"], out u, out ad)) until = ad ? u.AddDays(1).AddTicks(-1) : u;
+            }
+            List<KeyValuePair<int, int>> byDay = new List<KeyValuePair<int, int>>();    // (urutan, hari) mis. -1FR
+            if (r.ContainsKey("BYDAY"))
+                foreach (string bd in r["BYDAY"].Split(','))
+                {
+                    string s = bd.Trim().ToUpperInvariant();
+                    if (s.Length < 2) continue;
+                    int dow = Array.IndexOf(DayCodes, s.Substring(s.Length - 2));
+                    int ord = 0;
+                    if (s.Length > 2) int.TryParse(s.Substring(0, s.Length - 2), out ord);
+                    if (dow >= 0) byDay.Add(new KeyValuePair<int, int>(ord, dow));
+                }
+            List<int> byMonthDay = new List<int>(), byMonth = new List<int>();
+            if (r.ContainsKey("BYMONTHDAY")) foreach (string s in r["BYMONTHDAY"].Split(',')) { int v; if (int.TryParse(s, out v)) byMonthDay.Add(v); }
+            if (r.ContainsKey("BYMONTH")) foreach (string s in r["BYMONTH"].Split(',')) { int v; if (int.TryParse(s, out v)) byMonth.Add(v); }
+
+            int n = 0;
+            TimeSpan tod = e.Start.TimeOfDay;
+            for (int p = 0; p < 5000; p++)
+            {
+                List<DateTime> cands = new List<DateTime>();
+                if (freq == "DAILY") cands.Add(e.Start.AddDays((double)p * interval));
+                else if (freq == "WEEKLY")
+                {
+                    DateTime week = e.Start.Date.AddDays(-(((int)e.Start.DayOfWeek + 6) % 7)).AddDays(7.0 * p * interval);
+                    if (byDay.Count == 0) cands.Add(week.AddDays(((int)e.Start.DayOfWeek + 6) % 7) + tod);
+                    else foreach (KeyValuePair<int, int> bd in byDay) cands.Add(week.AddDays((bd.Value + 6) % 7) + tod);
+                }
+                else if (freq == "MONTHLY")
+                {
+                    DateTime m = new DateTime(e.Start.Year, e.Start.Month, 1).AddMonths(p * interval);
+                    if (byMonth.Count == 0 || byMonth.Contains(m.Month)) cands.AddRange(InMonth(m, e.Start, byDay, byMonthDay));
+                }
+                else if (freq == "YEARLY")
+                {
+                    int y = e.Start.Year + p * interval;
+                    if (y > 9998) break;
+                    List<int> months = byMonth.Count > 0 ? byMonth : new List<int> { e.Start.Month };
+                    foreach (int mo in months) cands.AddRange(InMonth(new DateTime(y, mo, 1), e.Start, byDay, byMonthDay));
+                }
+                else yield break;
+                cands.Sort();
+                foreach (DateTime c in cands)
+                {
+                    if (c < e.Start) continue;
+                    if (c > until) yield break;
+                    n++;
+                    if (count > 0 && n > count) yield break;
+                    if (c >= to) yield break;
+                    bool ex = e.ExDates.Any(x => e.AllDay ? x.Date == c.Date : Math.Abs((x - c).TotalMinutes) < 1);
+                    if (!ex && c + dur > from) yield return new KeyValuePair<DateTime, DateTime>(c, c + dur);
+                }
+            }
+        }
+
+        // tanggal-tanggal kejadian dalam satu bulan menurut BYDAY / BYMONTHDAY (atau tanggal yang sama dengan awal acara)
+        static List<DateTime> InMonth(DateTime month, DateTime start, List<KeyValuePair<int, int>> byDay, List<int> byMonthDay)
+        {
+            List<DateTime> l = new List<DateTime>();
+            int dim = DateTime.DaysInMonth(month.Year, month.Month);
+            TimeSpan tod = start.TimeOfDay;
+            if (byMonthDay.Count > 0)
+            {
+                foreach (int md in byMonthDay)
+                {
+                    int day = md > 0 ? md : dim + md + 1;
+                    if (day >= 1 && day <= dim) l.Add(new DateTime(month.Year, month.Month, day) + tod);
+                }
+            }
+            else if (byDay.Count > 0)
+            {
+                foreach (KeyValuePair<int, int> bd in byDay)
+                {
+                    List<int> days = new List<int>();
+                    for (int day = 1; day <= dim; day++) if ((int)new DateTime(month.Year, month.Month, day).DayOfWeek == bd.Value) days.Add(day);
+                    if (bd.Key == 0) foreach (int day in days) l.Add(new DateTime(month.Year, month.Month, day) + tod);
+                    else
+                    {
+                        int idx = bd.Key > 0 ? bd.Key - 1 : days.Count + bd.Key;
+                        if (idx >= 0 && idx < days.Count) l.Add(new DateTime(month.Year, month.Month, days[idx]) + tod);
+                    }
+                }
+            }
+            else if (start.Day <= dim) l.Add(new DateTime(month.Year, month.Month, start.Day) + tod);
+            return l;
+        }
+    }
+
+    static class CalData
+    {
+        public static Action Changed;                    // dipanggil di thread UI saat data berubah
+        static List<CalEvent> holidays = new List<CalEvent>(), personal = new List<CalEvent>();
+        static readonly string Dir = System.IO.Path.Combine(Store.Dir, "calendar");
+        static bool busy;
+        public static string PersonalError;
+        public static DateTime PersonalSynced = DateTime.MinValue;
+
+        public static bool HolidaysOn { get { return Prefs.Get("holidays", 1) != 0; } set { Prefs.Set("holidays", value ? 1 : 0); } }
+        public static bool HolidayLocal { get { return Prefs.Get("holidaylocal", 1) != 0; } set { Prefs.Set("holidaylocal", value ? 1 : 0); } }
+        public static bool RedSundays { get { return Prefs.Get("redsunday", 1) != 0; } set { Prefs.Set("redsunday", value ? 1 : 0); } }
+
+        // kalender hari libur Google per negara: (nama kalender, bahasa lokal). Diverifikasi satu per satu.
+        // Negara lain memakai kode negaranya langsung (format baru Google) dengan nama dalam bahasa Inggris.
+        static readonly Dictionary<string, string[]> Feeds = new Dictionary<string, string[]>
+        {
+            { "ID", new[] { "indonesian", "id" } }, { "MY", new[] { "malaysia", "ms" } }, { "SG", new[] { "singapore", null } },
+            { "PH", new[] { "philippines", "fil" } }, { "TH", new[] { "th", "th" } }, { "VN", new[] { "vietnamese", "vi" } },
+            { "JP", new[] { "japanese", "ja" } }, { "KR", new[] { "south_korea", "ko" } }, { "CN", new[] { "china", "zh-CN" } },
+            { "TW", new[] { "taiwan", "zh-TW" } }, { "HK", new[] { "hong_kong", "zh-TW" } }, { "IN", new[] { "indian", "hi" } },
+            { "BD", new[] { "bd", "bn" } }, { "PK", new[] { "pk", "ur" } }, { "LK", new[] { "lk", "si" } }, { "NP", new[] { "np", "ne" } },
+            { "MM", new[] { "mm", "my" } }, { "KH", new[] { "kh", "km" } }, { "LA", new[] { "la", "lo" } }, { "BN", new[] { "bn", null } },
+            { "AU", new[] { "australian", null } }, { "NZ", new[] { "new_zealand", null } }, { "US", new[] { "usa", null } },
+            { "CA", new[] { "canadian", null } }, { "GB", new[] { "uk", null } }, { "IE", new[] { "irish", null } },
+            { "DE", new[] { "german", "de" } }, { "AT", new[] { "austrian", "de" } }, { "CH", new[] { "ch", "de" } },
+            { "FR", new[] { "french", "fr" } }, { "BE", new[] { "be", "nl" } }, { "NL", new[] { "dutch", "nl" } },
+            { "IT", new[] { "italian", "it" } }, { "ES", new[] { "spain", "es" } }, { "PT", new[] { "portuguese", "pt-PT" } },
+            { "BR", new[] { "brazilian", "pt-BR" } }, { "MX", new[] { "mexican", "es" } }, { "AR", new[] { "ar", "es" } },
+            { "CL", new[] { "cl", "es" } }, { "CO", new[] { "co", "es" } }, { "PE", new[] { "pe", "es" } },
+            { "PL", new[] { "polish", "pl" } }, { "CZ", new[] { "czech", "cs" } }, { "SK", new[] { "slovak", "sk" } },
+            { "HU", new[] { "hungarian", "hu" } }, { "RO", new[] { "romanian", "ro" } }, { "BG", new[] { "bulgarian", "bg" } },
+            { "HR", new[] { "croatian", "hr" } }, { "SI", new[] { "slovenian", "sl" } }, { "GR", new[] { "greek", "el" } },
+            { "TR", new[] { "turkish", "tr" } }, { "RU", new[] { "russian", "ru" } }, { "UA", new[] { "ukrainian", "uk" } },
+            { "SE", new[] { "swedish", "sv" } }, { "NO", new[] { "norwegian", "no" } }, { "DK", new[] { "danish", "da" } },
+            { "FI", new[] { "finnish", "fi" } }, { "LV", new[] { "latvian", "lv" } }, { "LT", new[] { "lithuanian", "lt" } },
+            { "SA", new[] { "saudiarabian", "ar" } }, { "AE", new[] { "ae", "ar" } }, { "EG", new[] { "eg", "ar" } },
+            { "QA", new[] { "qa", "ar" } }, { "KW", new[] { "kw", "ar" } }, { "MA", new[] { "ma", "ar" } },
+            { "IL", new[] { "jewish", "iw" } }, { "ZA", new[] { "sa", null } }, { "NG", new[] { "ng", null } }, { "KE", new[] { "ke", null } }
+        };
+
+        [DllImport("kernel32.dll")] static extern int GetUserGeoID(int geoClass);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern int GetGeoInfo(int location, int geoType, StringBuilder data, int len, int langId);
+
+        // negara dari Settings > Time & language > Language & region > "Country or region"
+        // (bukan format tanggal: laptop bisa berformat US tapi negaranya Indonesia)
+        public static string Country
+        {
+            get
+            {
+                try
+                {
+                    int geo = GetUserGeoID(16);                 // GEOCLASS_NATION
+                    StringBuilder sb = new StringBuilder(8);
+                    if (geo != -1 && GetGeoInfo(geo, 4, sb, sb.Capacity, 0) > 0 && sb.Length == 2) return sb.ToString().ToUpperInvariant();   // GEO_ISO2
+                }
+                catch { }
+                try { return RegionInfo.CurrentRegion.TwoLetterISORegionName.ToUpperInvariant(); } catch { return "US"; }
+            }
+        }
+
+        public static string CountryName
+        {
+            get { try { return new RegionInfo(Country).EnglishName; } catch { return Country; } }
+        }
+
+        // bahasa lokal negara ini (null = hanya bahasa Inggris)
+        public static string LocalLanguage
+        {
+            get { string[] f; return Feeds.TryGetValue(Country, out f) ? f[1] : null; }
+        }
+
+        static string HolidayUrl(out string file)
+        {
+            string cc = Country;
+            string[] f;
+            string slug = Feeds.TryGetValue(cc, out f) ? f[0] : cc.ToLowerInvariant();
+            string lang = HolidayLocal && f != null && f[1] != null ? f[1] : "en";
+            file = System.IO.Path.Combine(Dir, "holidays-" + cc + "-" + lang + ".ics");
+            return "https://calendar.google.com/calendar/ical/" + lang + "." + slug + "%23holiday%40group.v.calendar.google.com/public/basic.ics";
+        }
+
+        // ----- link iCal pribadi (Google Calendar "Secret address in iCal format"): disimpan terenkripsi (DPAPI) -----
+        static string UrlFile { get { return System.IO.Path.Combine(Dir, "personal-url.dat"); } }
+        static string PersonalFile { get { return System.IO.Path.Combine(Dir, "personal.ics"); } }
+
+        public static string PersonalUrl
+        {
+            get
+            {
+                try
+                {
+                    if (!File.Exists(UrlFile)) return null;
+                    byte[] b = System.Security.Cryptography.ProtectedData.Unprotect(File.ReadAllBytes(UrlFile), null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+                    return Encoding.UTF8.GetString(b);
+                }
+                catch { return null; }
+            }
+        }
+
+        static void SaveUrl(string url)
+        {
+            Directory.CreateDirectory(Dir);
+            if (url == null) { if (File.Exists(UrlFile)) File.Delete(UrlFile); return; }
+            File.WriteAllBytes(UrlFile, System.Security.Cryptography.ProtectedData.Protect(Encoding.UTF8.GetBytes(url), null, System.Security.Cryptography.DataProtectionScope.CurrentUser));
+        }
+
+        static string Download(string url)
+        {
+            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+            using (WebClient wc = new WebClient())
+            {
+                wc.Headers[HttpRequestHeader.UserAgent] = "SlideDock/" + AppInfo.Version;
+                wc.Encoding = Encoding.UTF8;
+                string s = wc.DownloadString(url);
+                if (s.IndexOf("BEGIN:VCALENDAR", StringComparison.OrdinalIgnoreCase) < 0) throw new Exception("That link isn't an iCal calendar.");
+                return s;
+            }
+        }
+
+        static bool Stale(string file, TimeSpan age) { return !File.Exists(file) || DateTime.Now - File.GetLastWriteTime(file) > age; }
+
+        // muat dari cache, unduh yang sudah lama (libur: 7 hari, pribadi: 10 menit), lalu kabari UI
+        public static void Refresh(Dispatcher ui, bool force)
+        {
+            if (busy) return;
+            busy = true;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<CalEvent> h = new List<CalEvent>(), mine = new List<CalEvent>();
+                string err = null;
+                bool synced = false;
+                try
+                {
+                    Directory.CreateDirectory(Dir);
+                    if (HolidaysOn)
+                    {
+                        string file;
+                        string url = HolidayUrl(out file);
+                        if (force || Stale(file, TimeSpan.FromDays(7)))
+                            try { File.WriteAllText(file, Download(url), Encoding.UTF8); } catch { }   // offline: pakai cache
+                        if (File.Exists(file)) h = Ics.Parse(File.ReadAllText(file, Encoding.UTF8), true);
+                    }
+                    string purl = PersonalUrl;
+                    if (purl != null)
+                    {
+                        if (force || Stale(PersonalFile, TimeSpan.FromMinutes(10)))
+                        {
+                            try { File.WriteAllText(PersonalFile, Download(purl), Encoding.UTF8); synced = true; }
+                            catch (Exception ex) { err = ex.Message; }
+                        }
+                        if (File.Exists(PersonalFile)) mine = Ics.Parse(File.ReadAllText(PersonalFile, Encoding.UTF8), false);
+                    }
+                }
+                catch (Exception ex) { err = ex.Message; }
+                ui.BeginInvoke(new Action(delegate
+                {
+                    busy = false;
+                    holidays = h;
+                    personal = mine;
+                    PersonalError = err;
+                    if (synced) PersonalSynced = DateTime.Now;
+                    else if (PersonalSynced == DateTime.MinValue && File.Exists(PersonalFile)) PersonalSynced = File.GetLastWriteTime(PersonalFile);
+                    if (Changed != null) Changed();
+                }));
+            });
+        }
+
+        // simpan link kalender pribadi setelah dicek bisa dibaca; done(pesan error atau null) di thread UI
+        public static void Connect(string url, Dispatcher ui, Action<string> done)
+        {
+            url = (url ?? "").Trim();
+            if (url.StartsWith("webcal://", StringComparison.OrdinalIgnoreCase)) url = "https://" + url.Substring(9);
+            if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) && !url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            {
+                done("Paste the iCal link (it starts with https://).");
+                return;
+            }
+            string u = url;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string err = null;
+                try
+                {
+                    string ics = Download(u);
+                    Directory.CreateDirectory(Dir);
+                    File.WriteAllText(PersonalFile, ics, Encoding.UTF8);
+                    SaveUrl(u);
+                }
+                catch (Exception ex) { err = ex.Message; }
+                ui.BeginInvoke(new Action(delegate
+                {
+                    if (err == null) { PersonalSynced = DateTime.Now; PersonalError = null; Refresh(ui, false); }
+                    done(err);
+                }));
+            });
+        }
+
+        public static void Disconnect(Dispatcher ui)
+        {
+            try { SaveUrl(null); if (File.Exists(PersonalFile)) File.Delete(PersonalFile); } catch { }
+            PersonalSynced = DateTime.MinValue;
+            PersonalError = null;
+            Refresh(ui, false);
+        }
+
+        // semua hari libur & acara per tanggal dalam rentang [from, to)
+        public static Dictionary<DateTime, List<DayItem>> Range(DateTime from, DateTime to)
+        {
+            Dictionary<DateTime, List<DayItem>> map = new Dictionary<DateTime, List<DayItem>>();
+            foreach (List<CalEvent> src in new List<CalEvent>[] { HolidaysOn ? holidays : new List<CalEvent>(), personal })
+                foreach (CalEvent e in src)
+                {
+                    IEnumerable<KeyValuePair<DateTime, DateTime>> occ;
+                    try { occ = Ics.Occurrences(e, from, to).ToList(); } catch { continue; }
+                    foreach (KeyValuePair<DateTime, DateTime> o in occ)
+                    {
+                        // acara beberapa hari: masuk ke setiap harinya
+                        DateTime last = e.AllDay ? o.Value.Date.AddDays(-1) : (o.Value > o.Key ? o.Value.AddTicks(-1).Date : o.Key.Date);
+                        if (last < o.Key.Date) last = o.Key.Date;
+                        for (DateTime d = o.Key.Date; d <= last && d < to; d = d.AddDays(1))
+                        {
+                            if (d < from.Date) continue;
+                            List<DayItem> l;
+                            if (!map.TryGetValue(d, out l)) { l = new List<DayItem>(); map[d] = l; }
+                            if (e.Kind > 0 && l.Any(x => x.Kind == e.Kind && x.Title == e.Title)) continue;   // duplikat
+                            l.Add(new DayItem { Title = e.Title ?? "(no title)", Kind = e.Kind, Start = o.Key, End = o.Value, AllDay = e.AllDay });
+                        }
+                    }
+                }
+            foreach (List<DayItem> l in map.Values)
+                l.Sort(delegate(DayItem a, DayItem b)
+                {
+                    int ka = a.Kind == 0 ? 2 : a.Kind - 1, kb = b.Kind == 0 ? 2 : b.Kind - 1;     // libur, perayaan, lalu acara
+                    if (ka != kb) return ka.CompareTo(kb);
+                    if (a.AllDay != b.AllDay) return a.AllDay ? -1 : 1;
+                    return a.Start.CompareTo(b.Start);
+                });
+            return map;
+        }
+    }
+
     class CalendarPop : Popover
     {
         public Action OnNotifications;
@@ -5043,6 +5735,21 @@ namespace SlideDock
         readonly UniformGrid days = new UniformGrid();
         DateTime month;
 
+        // tanggal yang diklik + panel hari itu (hari libur, perayaan, acara Google)
+        DateTime selected = DateTime.Today;
+        Dictionary<DateTime, List<DayItem>> monthItems = new Dictionary<DateTime, List<DayItem>>();
+        readonly TextBlock dayTitle = new TextBlock();
+        readonly TextBlock daySub = new TextBlock();
+        readonly StackPanel dayList = new StackPanel();
+        readonly TextBlock todayBtn = new TextBlock();
+        public Action OnCalendarSettings;
+        static readonly Brush HolidayRed = new SolidColorBrush(Color.FromRgb(0xFF, 0x6B, 0x6B));
+        static readonly Brush Accent = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
+        static readonly Brush Muted = new SolidColorBrush(Color.FromArgb(0x99, 255, 255, 255));
+
+        // data hari libur/acara berubah (selesai diunduh): gambar ulang bila sedang tampil
+        public void DataChanged() { if (IsOpen) Render(); }
+
         public CalendarPop()
         {
             Border card = UI.Card(20, 14);
@@ -5096,6 +5803,22 @@ namespace SlideDock
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            todayBtn.Text = "Today";
+            todayBtn.Foreground = Accent;
+            todayBtn.FontSize = 12;
+            todayBtn.FontFamily = UI.Text;
+            todayBtn.Cursor = Cursors.Hand;
+            todayBtn.VerticalAlignment = VerticalAlignment.Center;
+            todayBtn.Margin = new Thickness(0, 0, 8, 0);
+            todayBtn.MouseLeftButtonUp += delegate
+            {
+                selected = DateTime.Today;
+                month = new DateTime(selected.Year, selected.Month, 1);
+                Render();
+            };
+            Grid.SetColumn(todayBtn, 1);
+            head.Children.Add(todayBtn);
             monthText.Foreground = Brushes.White;
             monthText.FontSize = 13.5;
             monthText.FontFamily = UI.Text;
@@ -5104,8 +5827,8 @@ namespace SlideDock
             head.Children.Add(monthText);
             FrameworkElement prev = NavButton("\uE76B", -1);
             FrameworkElement next = NavButton("\uE76C", 1);
-            Grid.SetColumn(prev, 1);
-            Grid.SetColumn(next, 2);
+            Grid.SetColumn(prev, 2);
+            Grid.SetColumn(next, 3);
             head.Children.Add(prev);
             head.Children.Add(next);
             sp.Children.Add(head);
@@ -5127,6 +5850,7 @@ namespace SlideDock
             days.Columns = 7;
             days.Rows = 6;
             sp.Children.Add(days);
+            sp.Children.Add(BuildDayPanel());
 
             Border notif = new Border();
             notif.CornerRadius = new CornerRadius(10);
@@ -5184,10 +5908,10 @@ namespace SlideDock
 
         // dock bawah: Notifications (kiri) + Calendar (kanan).
         // dock kiri/kanan: Calendar (atas) + Notifications (bawah) agar rapi di samping dock;
-        // tapi di layar pendek (< 760) tetap berdampingan supaya tidak melewati layar.
+        // tapi di layar yang kurang tinggi (< 980) tetap berdampingan supaya tidak melewati layar.
         void ArrangeCards()
         {
-            bool v = Layout.V && Popover.Scr.Height >= 760;
+            bool v = Layout.V && Popover.Scr.Height >= 980;
             if (arrangedV == v) return;
             arrangedV = v;
             two.RowDefinitions.Clear();
@@ -5215,6 +5939,148 @@ namespace SlideDock
             notifScroll.MaxHeight = notifMax;
         }
 
+        FrameworkElement BuildDayPanel()
+        {
+            StackPanel p = new StackPanel();
+            Border sep = new Border();
+            sep.Height = 1;
+            sep.Margin = new Thickness(0, 10, 0, 10);
+            sep.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            p.Children.Add(sep);
+            dayTitle.Foreground = Brushes.White;
+            dayTitle.FontSize = 13.5;
+            dayTitle.FontWeight = FontWeights.SemiBold;
+            dayTitle.FontFamily = UI.Text;
+            dayTitle.Margin = new Thickness(2, 0, 0, 0);
+            p.Children.Add(dayTitle);
+            daySub.Foreground = Muted;
+            daySub.FontSize = 11.5;
+            daySub.FontFamily = UI.Text;
+            daySub.Margin = new Thickness(2, 1, 0, 4);
+            p.Children.Add(daySub);
+            ScrollViewer sv = new ScrollViewer();
+            sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            sv.MaxHeight = 128;
+            sv.Content = dayList;
+            p.Children.Add(sv);
+
+            Grid actions = new Grid();
+            actions.Margin = new Thickness(0, 10, 0, 0);
+            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock open = new TextBlock();
+            open.Text = "Open in Google Calendar";
+            open.Foreground = Accent;
+            open.FontSize = 12;
+            open.FontFamily = UI.Text;
+            open.Cursor = Cursors.Hand;
+            open.VerticalAlignment = VerticalAlignment.Center;
+            open.Margin = new Thickness(2, 0, 0, 0);
+            open.MouseLeftButtonUp += delegate
+            {
+                HidePanel();
+                Launcher.Open("https://calendar.google.com/calendar/r/day/" + selected.Year + "/" + selected.Month + "/" + selected.Day);
+            };
+            actions.Children.Add(open);
+            Border add = new Border();
+            add.CornerRadius = new CornerRadius(8);
+            add.Padding = new Thickness(11, 4, 12, 5);
+            add.Cursor = Cursors.Hand;
+            add.Background = Accent;
+            add.ToolTip = "New event on this day in Google Calendar";
+            TextBlock at = new TextBlock();
+            at.Text = "+ Event";
+            at.FontSize = 12;
+            at.FontWeight = FontWeights.SemiBold;
+            at.FontFamily = UI.Text;
+            at.Foreground = Brushes.Black;
+            add.Child = at;
+            add.MouseLeftButtonUp += delegate
+            {
+                HidePanel();
+                string d0 = selected.ToString("yyyyMMdd", CultureInfo.InvariantCulture), d1 = selected.AddDays(1).ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+                Launcher.Open("https://calendar.google.com/calendar/r/eventedit?dates=" + d0 + "/" + d1);
+            };
+            Grid.SetColumn(add, 1);
+            actions.Children.Add(add);
+            p.Children.Add(actions);
+            return p;
+        }
+
+        static string Relative(DateTime d)
+        {
+            int n = (int)(d.Date - DateTime.Today).TotalDays;
+            if (n == 0) return "Today";
+            if (n == 1) return "Tomorrow";
+            if (n == -1) return "Yesterday";
+            return n > 0 ? "In " + n + " days" : -n + " days ago";
+        }
+
+        void RenderDay()
+        {
+            dayTitle.Text = selected.ToString("dddd, d MMMM yyyy", Id);
+            daySub.Text = Relative(selected);
+            dayList.Children.Clear();
+            List<DayItem> items;
+            if (!monthItems.TryGetValue(selected.Date, out items) || items.Count == 0)
+            {
+                TextBlock none = new TextBlock();
+                none.Text = "No holidays or events";
+                none.Foreground = Muted;
+                none.FontSize = 12;
+                none.FontFamily = UI.Text;
+                none.Margin = new Thickness(2, 4, 0, 0);
+                dayList.Children.Add(none);
+                if (CalData.PersonalUrl == null)
+                {
+                    TextBlock link = new TextBlock();
+                    link.Text = "Show my Google Calendar events here";
+                    link.Foreground = Accent;
+                    link.FontSize = 12;
+                    link.FontFamily = UI.Text;
+                    link.Cursor = Cursors.Hand;
+                    link.Margin = new Thickness(2, 4, 0, 0);
+                    link.MouseLeftButtonUp += delegate { if (OnCalendarSettings != null) OnCalendarSettings(); };
+                    dayList.Children.Add(link);
+                }
+                return;
+            }
+            foreach (DayItem it in items)
+            {
+                Grid row = new Grid();
+                row.Margin = new Thickness(2, 5, 0, 0);
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                Border bar = new Border();
+                bar.Width = 3;
+                bar.CornerRadius = new CornerRadius(1.5);
+                bar.Margin = new Thickness(0, 1, 9, 1);
+                bar.Background = it.Kind == 1 ? HolidayRed : it.Kind == 2 ? Muted : Accent;
+                row.Children.Add(bar);
+                StackPanel tx = new StackPanel();
+                TextBlock title = new TextBlock();
+                title.Text = it.Title;
+                title.Foreground = Brushes.White;
+                title.FontSize = 12.5;
+                title.FontFamily = UI.Text;
+                title.TextWrapping = TextWrapping.Wrap;
+                tx.Children.Add(title);
+                TextBlock sub = new TextBlock();
+                sub.Foreground = Muted;
+                sub.FontSize = 11;
+                sub.FontFamily = UI.Text;
+                if (it.Kind == 1) sub.Text = "Public holiday";
+                else if (it.Kind == 2) sub.Text = "Observance";
+                else if (it.AllDay) sub.Text = "All day";
+                else if (it.Start.Date == it.End.Date || it.End <= it.Start) sub.Text = it.Start.ToString("HH:mm") + (it.End > it.Start ? " \u2013 " + it.End.ToString("HH:mm") : "");
+                else sub.Text = it.Start.ToString("d MMM HH:mm", Id) + " \u2013 " + it.End.ToString("d MMM HH:mm", Id);
+                tx.Children.Add(sub);
+                Grid.SetColumn(tx, 1);
+                row.Children.Add(tx);
+                dayList.Children.Add(row);
+            }
+        }
+
         FrameworkElement NavButton(string glyph, int delta)
         {
             Border b = new Border();
@@ -5237,34 +6103,81 @@ namespace SlideDock
             int offset = ((int)first.DayOfWeek + 6) % 7;
             DateTime start = first.AddDays(-offset);
             DateTime today = DateTime.Today;
+            monthItems = CalData.Range(start, start.AddDays(42));
+            todayBtn.Visibility = month == new DateTime(today.Year, today.Month, 1) && selected == today ? Visibility.Collapsed : Visibility.Visible;
             for (int i = 0; i < 42; i++)
             {
                 DateTime d = start.AddDays(i);
+                List<DayItem> items;
+                monthItems.TryGetValue(d, out items);
+                bool holiday = items != null && items.Any(x => x.Kind == 1);
+                bool red = holiday || (CalData.RedSundays && d.DayOfWeek == DayOfWeek.Sunday);
+                bool isToday = d == today, isSel = d == selected;
+
                 Border c = new Border();
                 c.Width = 32;
                 c.Height = 32;
                 c.Margin = new Thickness(3, 2, 3, 2);
                 c.CornerRadius = new CornerRadius(16);
+                c.Cursor = Cursors.Hand;
+                c.Background = isToday ? Accent : Brushes.Transparent;
+                if (isSel && !isToday) { c.BorderBrush = Accent; c.BorderThickness = new Thickness(1.5); }
+                Grid g = new Grid();
                 TextBlock t = new TextBlock();
                 t.Text = d.Day.ToString();
                 t.FontSize = 12.5;
                 t.FontFamily = UI.Text;
                 t.HorizontalAlignment = HorizontalAlignment.Center;
                 t.VerticalAlignment = VerticalAlignment.Center;
-                if (d == today)
+                if (isToday)
                 {
-                    c.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
                     t.Foreground = Brushes.Black;
                     t.FontWeight = FontWeights.SemiBold;
                 }
                 else
                 {
-                    t.Foreground = Brushes.White;
-                    t.Opacity = d.Month == month.Month ? 1 : 0.35;
+                    t.Foreground = red ? HolidayRed : Brushes.White;
+                    if (holiday) t.FontWeight = FontWeights.SemiBold;
                 }
-                c.Child = t;
+                g.Children.Add(t);
+                // titik kecil: merah = libur nasional, abu-abu = perayaan, biru = acara Google
+                if (items != null && items.Count > 0)
+                {
+                    StackPanel dots = new StackPanel();
+                    dots.Orientation = Orientation.Horizontal;
+                    dots.HorizontalAlignment = HorizontalAlignment.Center;
+                    dots.VerticalAlignment = VerticalAlignment.Bottom;
+                    dots.Margin = new Thickness(0, 0, 0, 3);
+                    foreach (int kind in new int[] { 1, 2, 0 })
+                    {
+                        if (!items.Any(x => x.Kind == kind)) continue;
+                        System.Windows.Shapes.Ellipse dot = new System.Windows.Shapes.Ellipse();
+                        dot.Width = 4;
+                        dot.Height = 4;
+                        dot.Margin = new Thickness(0.75, 0, 0.75, 0);
+                        dot.Fill = kind == 1 ? HolidayRed : kind == 2 ? (isToday ? new SolidColorBrush(Color.FromArgb(0x99, 0, 0, 0)) : Muted)
+                                 : (isToday ? new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x1C)) : Accent);
+                        dots.Children.Add(dot);
+                    }
+                    g.Children.Add(dots);
+                }
+                if (d.Month != month.Month) g.Opacity = 0.35;
+                c.Child = g;
+                if (!isToday)
+                {
+                    c.MouseEnter += delegate { c.Background = new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255)); };
+                    c.MouseLeave += delegate { c.Background = Brushes.Transparent; };
+                }
+                DateTime day = d;
+                c.MouseLeftButtonUp += delegate
+                {
+                    selected = day;
+                    if (day.Month != month.Month || day.Year != month.Year) month = new DateTime(day.Year, day.Month, 1);
+                    Render();
+                };
                 days.Children.Add(c);
             }
+            RenderDay();
         }
 
         static string Cap(string s)
@@ -5277,6 +6190,8 @@ namespace SlideDock
             if (IsOpen) return;
             SideAnchor = clock.Y;
             month = new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1);
+            selected = DateTime.Today;
+            CalData.Refresh(Dispatcher, false);
             arrangedV = null;                         // layar bisa berbeda dari sebelumnya
             ArrangeCards();
             notifScroll.MaxHeight = notifMax;
@@ -7991,6 +8906,40 @@ namespace SlideDock
                     app.Shutdown();
                 };
                 menu.Items.Add("Exit (restore Windows taskbar)", null, delegate { exitApp(); });
+
+                // Uninstall: taskbar Windows kembali seperti semula (tampil, auto-hide sesuai aslinya),
+                // tidak lagi mulai bersama Windows, lalu file app & pengaturannya dihapus
+                Action uninstallApp = delegate
+                {
+                    hideAll();
+                    string msg = AppInfo.Packaged
+                        ? "Uninstall SlideDock?\n\nThe Windows taskbar comes back with its original settings, SlideDock stops starting with Windows and closes.\n\nInstalled apps in Windows Settings then opens so you can finish removing SlideDock."
+                        : "Uninstall SlideDock?\n\nThe Windows taskbar comes back with its original settings, SlideDock stops starting with Windows and closes, then SlideDock.exe and its settings (pinned apps, theme, calendar link) are deleted.";
+                    if (MessageBox.Show(msg, "Uninstall SlideDock", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes) return;
+                    Log("uninstall: restore taskbar defaults, remove autostart");
+                    TaskbarCtl.RestoreDefaults();
+                    SetAutoStart(false);
+                    if (AppInfo.Packaged) Launcher.Open("ms-settings:appsfeatures");
+                    else
+                    {
+                        // file .exe yang sedang berjalan tidak bisa dihapus: tunggu proses ini selesai, baru hapus
+                        Func<string, string> q = delegate(string p) { return "'" + p.Replace("'", "''") + "'"; };
+                        string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                        string ps = "Wait-Process -Id " + Process.GetCurrentProcess().Id + " -Timeout 30 -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500; " +
+                                    "Remove-Item -LiteralPath " + q(exe) + "," + q(exe + ".old") + "," + q(exe + ".new") + " -Force -ErrorAction SilentlyContinue; " +
+                                    "Remove-Item -LiteralPath " + q(Store.Dir) + " -Recurse -Force -ErrorAction SilentlyContinue";
+                        try
+                        {
+                            ProcessStartInfo psi = new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -WindowStyle Hidden -Command \"" + ps + "\"");
+                            psi.CreateNoWindow = true;
+                            psi.UseShellExecute = false;
+                            Process.Start(psi);
+                        }
+                        catch { }
+                    }
+                    exitApp();
+                };
+                menu.Items.Add("Uninstall SlideDock...", null, delegate { uninstallApp(); });
                 tray.ContextMenuStrip = menu;
 
                 // menu SlideDock di dock (klik kanan tombol Start / area kosong dock)
@@ -8062,6 +9011,14 @@ namespace SlideDock
                     updTimer.Start();
                 }
 
+                // ----- kalender: hari libur & Google Calendar (unduh di latar, simpan cache untuk offline) -----
+                string calStatus = null;
+                CalData.Changed = delegate { cal.DataChanged(); start.RefreshSettings(); };
+                cal.OnCalendarSettings = delegate { cal.HidePanel(); use(cur); start.ShowSettings(cur.SurfaceTop); };
+                DispatcherTimer calTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(4) };
+                calTimer.Tick += delegate { calTimer.Interval = TimeSpan.FromMinutes(15); CalData.Refresh(app.Dispatcher, false); };
+                calTimer.Start();
+
                 // Dock settings di Start: tiap pilihan langsung berlaku
                 string[] themeKeys = new string[] { "glass", "dark", "aurora" };
                 start.SettingsProvider = delegate
@@ -8102,6 +9059,44 @@ namespace SlideDock
                     l.Add(new DockSetting { Section = "Behavior", Label = "Start with Windows", Toggle = true,
                         Get = delegate { return AutoStartOn() ? 1 : 0; },
                         Set = delegate(int i) { SetAutoStart(i != 0); auto.Checked = AutoStartOn(); } });
+                    string country = CalData.CountryName;
+                    l.Add(new DockSetting { Section = "Calendar", Label = "Public holidays in " + country + " (from your Windows region)", Toggle = true,
+                        Get = delegate { return CalData.HolidaysOn ? 1 : 0; },
+                        Set = delegate(int i) { CalData.HolidaysOn = i != 0; CalData.Refresh(app.Dispatcher, false); } });
+                    if (CalData.HolidaysOn && CalData.LocalLanguage != null)
+                        l.Add(new DockSetting { Section = "Calendar", Label = "Holiday names", Choices = new string[] { "Local language", "English" },
+                            Get = delegate { return CalData.HolidayLocal ? 0 : 1; },
+                            Set = delegate(int i) { CalData.HolidayLocal = i == 0; CalData.Refresh(app.Dispatcher, false); } });
+                    l.Add(new DockSetting { Section = "Calendar", Label = "Sundays in red", Toggle = true,
+                        Get = delegate { return CalData.RedSundays ? 1 : 0; },
+                        Set = delegate(int i) { CalData.RedSundays = i != 0; } });
+                    if (CalData.PersonalUrl == null)
+                    {
+                        l.Add(new DockSetting { Section = "Calendar", Label = "Show your Google Calendar events (read-only)", Input = true,
+                            Placeholder = "Paste the \"Secret address in iCal format\"",
+                            SetText = delegate(string url)
+                            {
+                                calStatus = "Checking the link...";
+                                start.RefreshSettings();
+                                CalData.Connect(url, app.Dispatcher, delegate(string err)
+                                {
+                                    calStatus = err == null ? null : "Couldn't use that link: " + err;
+                                    start.RefreshSettings();
+                                });
+                            } });
+                        if (calStatus != null) l.Add(new DockSetting { Section = "Calendar", Label = calStatus });
+                        l.Add(new DockSetting { Section = "Calendar", Label = "Where do I find this link?",
+                            Click = delegate { start.HidePanel(); Launcher.Open("https://support.google.com/calendar/answer/37648"); } });
+                    }
+                    else
+                    {
+                        string synced = CalData.PersonalSynced == DateTime.MinValue ? "" :
+                            "  \u00b7  synced " + (DateTime.Now - CalData.PersonalSynced).TotalMinutes.ToString("0") + " min ago";
+                        l.Add(new DockSetting { Section = "Calendar", Label = (CalData.PersonalError != null ? "Google Calendar: last sync failed (" + CalData.PersonalError + "). Try again" : "Google Calendar connected" + synced + ". Sync now"),
+                            Click = delegate { CalData.Refresh(app.Dispatcher, true); } });
+                        l.Add(new DockSetting { Section = "Calendar", Label = "Disconnect Google Calendar",
+                            Click = delegate { calStatus = null; CalData.Disconnect(app.Dispatcher); } });
+                    }
                     if (!Updater.Enabled)
                         l.Add(new DockSetting { Section = "Updates", Label = "Version " + AppInfo.Version + "  ·  updates come from Microsoft Store",
                             Click = delegate { Launcher.Open("ms-windows-store://downloadsandupdates"); } });
@@ -8127,6 +9122,8 @@ namespace SlideDock
                         Click = delegate { start.HidePanel(); Process.Start("explorer.exe", Store.Dir); } });
                     l.Add(new DockSetting { Section = "More", Label = "Exit SlideDock (restore taskbar)",
                         Click = delegate { exitApp(); } });
+                    l.Add(new DockSetting { Section = "More", Label = "Uninstall SlideDock (restore all Windows taskbar settings)",
+                        Click = delegate { start.HidePanel(); uninstallApp(); } });
                     return l;
                 };
 
@@ -8174,6 +9171,34 @@ namespace SlideDock
                     Log("Windows " + (e.ReasonSessionEnding == ReasonSessionEnding.Shutdown ? "shutdown/restart" : "sign out") + ": keep taskbar auto-hide on");
                     TaskbarCtl.KeepHiddenForNextLogin();
                 };
+                // Windows menutup SlideDock untuk uninstall/update (Restart Manager, mis. hapus versi Store dari
+                // Settings): pesan end-session dengan ENDSESSION_CLOSEAPP. Ini bukan shutdown, jadi taskbar
+                // dikembalikan penuh; tanpa ini auto-hide tertinggal aktif setelah app dihapus.
+                bool closeAppPending = false;
+                HwndSourceParameters sessParams = new HwndSourceParameters("SlideDock session");
+                sessParams.WindowStyle = 0;               // jendela tersembunyi (bukan message-only: harus ikut menerima pesan ini)
+                sessParams.Width = 0;
+                sessParams.Height = 0;
+                HwndSource sessWnd = new HwndSource(sessParams);
+                sessWnd.AddHook(delegate(IntPtr h, int msg, IntPtr wp, IntPtr lp, ref bool handled)
+                {
+                    bool closeApp = (lp.ToInt64() & 1) != 0;
+                    if (msg == 0x11 && closeApp && !TaskbarCtl.Releasing)            // WM_QUERYENDSESSION
+                    {
+                        closeAppPending = true;
+                        Log("Windows is closing SlideDock (app uninstall/update): restore taskbar defaults");
+                        TaskbarCtl.RestoreDefaults();
+                    }
+                    else if (msg == 0x16 && closeAppPending && wp == IntPtr.Zero)    // WM_ENDSESSION dibatalkan: tetap jalan
+                    {
+                        closeAppPending = false;
+                        sessionEnding = false;
+                        TaskbarCtl.Releasing = false;
+                        TaskbarCtl.HideEnabled = Prefs.HideTaskbar;
+                        TaskbarCtl.Apply();
+                    }
+                    return IntPtr.Zero;
+                });
                 app.Exit += delegate
                 {
                     WinKeyHook.Uninstall();
@@ -8235,6 +9260,7 @@ namespace SlideDock
                 if (!dock.HotkeyOk)
                     tray.ShowBalloonTip(5000, "SlideDock", "Win+Alt+Space is already used by another app.", WF.ToolTipIcon.Warning);
                 app.Run();
+                GC.KeepAlive(sessWnd);
             }
         }
     }
