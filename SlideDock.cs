@@ -116,7 +116,7 @@ namespace SlideDock
     }
 
     // ----- update otomatis dari GitHub Releases (versi biasa, bukan versi Store) -----
-    class UpdateInfo { public Version Ver; public string Tag, Page, ExeUrl, ShaUrl; }
+    class UpdateInfo { public Version Ver; public string Tag, Page, ExeUrl, ShaUrl; public List<string> Notes = new List<string>(); }
 
     static class Updater
     {
@@ -155,6 +155,7 @@ namespace SlideDock
             u.Ver = AppInfo.Norm(v);
             u.Tag = tag;
             u.Page = d.ContainsKey("html_url") ? d["html_url"] as string : AppInfo.ReleasesPage;
+            u.Notes = Summary(d.ContainsKey("body") ? d["body"] as string : null);
             System.Collections.IEnumerable assets = d.ContainsKey("assets") ? d["assets"] as System.Collections.IEnumerable : null;
             if (assets != null)
                 foreach (object o in assets)
@@ -166,6 +167,25 @@ namespace SlideDock
                     else if (name == "SlideDock.exe.sha256") u.ShaUrl = url;
                 }
             return u;
+        }
+
+        // ringkasan rilis: butir "- ..." dari catatan rilis (ditulis CI dari pesan commit rilis), tanpa format Markdown
+        static List<string> Summary(string body)
+        {
+            List<string> l = new List<string>();
+            if (string.IsNullOrEmpty(body)) return l;
+            foreach (string raw in body.Replace("\r", "").Split('\n'))
+            {
+                if (raw.StartsWith("- ")) l.Add(raw.Substring(2).Trim());
+                else if (l.Count > 0 && raw.StartsWith("  ") && raw.Trim().Length > 0) l[l.Count - 1] += " " + raw.Trim();
+                else if (l.Count > 0 && raw.Trim().Length == 0) break;     // butir berikutnya = bagian lain (daftar otomatis GitHub)
+            }
+            for (int i = 0; i < l.Count; i++)
+            {
+                string t = Regex.Replace(l[i], @"\[([^\]]+)\]\([^)]*\)", "$1");
+                l[i] = t.Replace("**", "").Replace("`", "");
+            }
+            return l.Take(8).ToList();
         }
 
         // cek rilis terbaru di thread latar; done(pesan) di thread UI (pesan null = berhasil)
@@ -320,8 +340,6 @@ namespace SlideDock
         // 0 = mati, 1 = halus, 2 = kuat
         public static int Magnify { get { return Get("magnify", 2); } set { Set("magnify", value); } }
         public static bool Notch { get { return Get("notch", 1) != 0; } set { Set("notch", value ? 1 : 0); } }
-        public static bool WinKey { get { return Get("winkey", 1) != 0; } set { Set("winkey", value ? 1 : 0); } }
-        public static bool HideTaskbar { get { return Get("hidetaskbar", 1) != 0; } set { Set("hidetaskbar", value ? 1 : 0); } }
         // 0 = otomatis (menurut ukuran layar), 1 = kecil, 2 = sedang, 3 = besar
         public static int DockSize { get { return Get("docksize", 0); } set { Set("docksize", value); } }
         public static bool DockMove { get { return Get("dockmove", 0) != 0; } set { Set("dockmove", value ? 1 : 0); } }
@@ -1181,7 +1199,6 @@ namespace SlideDock
     {
         public static bool HideEnabled = true;
         static int prev = -1;
-        static DateTime peekUntil = DateTime.MinValue;
 
         static List<IntPtr> Trays()
         {
@@ -1267,18 +1284,11 @@ namespace SlideDock
             foreach (IntPtr t in Trays()) Native.ShowWindow(t, 5);
         }
 
-        // Tampilkan taskbar Windows sebentar (untuk ikon tray)
-        public static void Peek(int seconds)
-        {
-            peekUntil = DateTime.Now.AddSeconds(seconds);
-            ShowAll();
-        }
-
         static int lastAutoHideCheck;
 
         public static void Enforce()
         {
-            if (!HideEnabled || DateTime.Now < peekUntil) return;
+            if (!HideEnabled) return;
             // bila auto-hide terlepas (mis. Explorer dimulai ulang), Windows menyisakan ruang taskbar: pasang lagi
             if (Environment.TickCount - lastAutoHideCheck > 2000)
             {
@@ -1350,7 +1360,7 @@ namespace SlideDock
             card.Margin = new Thickness(margin);
             card.CornerRadius = new CornerRadius(radius);
             card.Background = new SolidColorBrush(Color.FromArgb(0xF8, 0x1B, 0x1B, 0x21));
-            card.BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            card.BorderBrush = UI.Ink(0x40);
             card.BorderThickness = new Thickness(1);
             card.Effect = new DropShadowEffect { BlurRadius = 28, ShadowDepth = 4, Opacity = 0.5, Color = Colors.Black };
             return card;
@@ -1362,7 +1372,7 @@ namespace SlideDock
             t.Text = code;
             t.FontFamily = Fluent;
             t.FontSize = size;
-            t.Foreground = Brushes.White;
+            t.Foreground = UI.Fg;
             t.VerticalAlignment = VerticalAlignment.Center;
             t.HorizontalAlignment = HorizontalAlignment.Center;
             return t;
@@ -1372,19 +1382,23 @@ namespace SlideDock
         public static void ApplyMenuStyle(Application app)
         {
             string ns = "xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'";
+            bool lt = Light;
+            string mBg = lt ? "#FAF8F8FA" : "#FA1E1E24", mEdge = lt ? "#26000000" : "#40FFFFFF", mFg = lt ? "#16161C" : "White";
+            string mHi = lt ? "#16000000" : "#30FFFFFF", tBg = lt ? "#F8FAFAFC" : "#F2202026", sh = lt ? "0.22" : "0.5";
+            string th1 = lt ? "#40000000" : "#50FFFFFF", th2 = lt ? "#70000000" : "#90FFFFFF", th3 = lt ? "#90000000" : "#B0FFFFFF";
             string menuXaml =
                 "<Style " + ns + " TargetType='ContextMenu'>" +
                 "<Setter Property='OverridesDefaultStyle' Value='True'/>" +
                 "<Setter Property='HasDropShadow' Value='False'/>" +
                 "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ContextMenu'>" +
-                "<Border Background='#FA1E1E24' BorderBrush='#40FFFFFF' BorderThickness='1' CornerRadius='12' Padding='5' Margin='10'>" +
-                "<Border.Effect><DropShadowEffect BlurRadius='18' ShadowDepth='3' Opacity='0.5'/></Border.Effect>" +
+                "<Border Background='" + mBg + "' BorderBrush='" + mEdge + "' BorderThickness='1' CornerRadius='12' Padding='5' Margin='10'>" +
+                "<Border.Effect><DropShadowEffect BlurRadius='18' ShadowDepth='3' Opacity='" + sh + "'/></Border.Effect>" +
                 "<StackPanel IsItemsHost='True' KeyboardNavigation.DirectionalNavigation='Cycle'/>" +
                 "</Border></ControlTemplate></Setter.Value></Setter></Style>";
             string itemXaml =
                 "<Style " + ns + " TargetType='MenuItem'>" +
                 "<Setter Property='OverridesDefaultStyle' Value='True'/>" +
-                "<Setter Property='Foreground' Value='White'/>" +
+                "<Setter Property='Foreground' Value='" + mFg + "'/>" +
                 "<Setter Property='FontFamily' Value='Segoe UI Variable Text, Segoe UI Variable, Segoe UI'/>" +
                 "<Setter Property='FontSize' Value='13'/>" +
                 "<Setter Property='Cursor' Value='Hand'/>" +
@@ -1392,25 +1406,25 @@ namespace SlideDock
                 "<Border x:Name='bd' Background='Transparent' CornerRadius='8' Padding='12,8,22,8' MinWidth='170'>" +
                 "<ContentPresenter ContentSource='Header' RecognizesAccessKey='True'/></Border>" +
                 "<ControlTemplate.Triggers><Trigger Property='IsHighlighted' Value='True'>" +
-                "<Setter TargetName='bd' Property='Background' Value='#30FFFFFF'/></Trigger></ControlTemplate.Triggers>" +
+                "<Setter TargetName='bd' Property='Background' Value='" + mHi + "'/></Trigger></ControlTemplate.Triggers>" +
                 "</ControlTemplate></Setter.Value></Setter></Style>";
             // tooltip gelap membulat, senada dengan dock (bukan kotak putih bawaan Windows)
             string tipXaml =
                 "<Style " + ns + " TargetType='ToolTip'>" +
                 "<Setter Property='OverridesDefaultStyle' Value='True'/>" +
                 "<Setter Property='HasDropShadow' Value='False'/>" +
-                "<Setter Property='Foreground' Value='White'/>" +
+                "<Setter Property='Foreground' Value='" + mFg + "'/>" +
                 "<Setter Property='FontFamily' Value='Segoe UI Variable Text, Segoe UI Variable, Segoe UI'/>" +
                 "<Setter Property='FontSize' Value='12'/>" +
                 "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ToolTip'>" +
-                "<Border Background='#F2202026' BorderBrush='#40FFFFFF' BorderThickness='1' CornerRadius='8' Padding='10,5,10,6' Margin='8'>" +
-                "<Border.Effect><DropShadowEffect BlurRadius='12' ShadowDepth='2' Opacity='0.45'/></Border.Effect>" +
+                "<Border Background='" + tBg + "' BorderBrush='" + mEdge + "' BorderThickness='1' CornerRadius='8' Padding='10,5,10,6' Margin='8'>" +
+                "<Border.Effect><DropShadowEffect BlurRadius='12' ShadowDepth='2' Opacity='" + sh + "'/></Border.Effect>" +
                 "<ContentPresenter/></Border></ControlTemplate></Setter.Value></Setter></Style>";
             // scrollbar tipis & gelap (bukan scrollbar putih bawaan Windows)
             string thumb = "<Track.Thumb><Thumb><Thumb.Template><ControlTemplate TargetType='Thumb'>" +
-                "<Border x:Name='t' CornerRadius='3' Background='#50FFFFFF'/>" +
-                "<ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='t' Property='Background' Value='#90FFFFFF'/></Trigger>" +
-                "<Trigger Property='IsDragging' Value='True'><Setter TargetName='t' Property='Background' Value='#B0FFFFFF'/></Trigger></ControlTemplate.Triggers>" +
+                "<Border x:Name='t' CornerRadius='3' Background='" + th1 + "'/>" +
+                "<ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='t' Property='Background' Value='" + th2 + "'/></Trigger>" +
+                "<Trigger Property='IsDragging' Value='True'><Setter TargetName='t' Property='Background' Value='" + th3 + "'/></Trigger></ControlTemplate.Triggers>" +
                 "</ControlTemplate></Thumb.Template></Thumb></Track.Thumb>";
             string barXaml =
                 "<Style " + ns + " TargetType='ScrollBar'>" +
@@ -1435,27 +1449,55 @@ namespace SlideDock
             catch { }
         }
 
-        // tema Aurora: gradasi ungu -> biru -> toska seperti cahaya kutub
-        public static Brush AuroraTint(byte a)
+        // ---- tema: "glass" (Glass 1, kaca gelap), "glass2" (Glass 2, kaca putih, teks hitam), "dark" ----
+        public static bool Light { get { return Theme == "glass2"; } }
+        static bool themeApplied;
+
+        // tema tersimpan; "aurora" (versi lama) menjadi Glass 2
+        public static string NormTheme(string t)
         {
-            LinearGradientBrush g = new LinearGradientBrush();
-            g.StartPoint = new Point(0, 0);
-            g.EndPoint = new Point(1, 1);
-            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x7B, 0x3F, 0xE4), 0));
-            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x2F, 0x6B, 0xFF), 0.5));
-            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x19, 0xC3, 0xB0), 1));
-            return g;
+            t = (t ?? "").Trim();
+            if (t == "aurora") return "glass2";
+            return t == "dark" || t == "glass2" ? t : "glass";
         }
 
-        public static Brush AuroraEdge(byte a)
+        public static string SavedTheme()
         {
-            LinearGradientBrush g = new LinearGradientBrush();
-            g.StartPoint = new Point(0, 0);
-            g.EndPoint = new Point(1, 1);
-            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0xFF, 0x8A, 0xD8), 0));
-            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0xA9, 0x9B, 0xFF), 0.5));
-            g.GradientStops.Add(new GradientStop(Color.FromArgb(a, 0x70, 0xE6, 0xFF), 1));
-            return g;
+            try
+            {
+                string f = System.IO.Path.Combine(Store.Dir, "theme.txt");
+                if (File.Exists(f)) return NormTheme(File.ReadAllText(f));
+            }
+            catch { }
+            return "glass";
+        }
+
+        // warna teks & garis yang ikut tema: putih di Glass 1 / Dark, hitam di Glass 2.
+        // Satu brush per tingkat transparansi dipakai bersama, jadi ganti tema langsung mengubah semua yang sudah tampil.
+        static readonly Dictionary<byte, SolidColorBrush> inks = new Dictionary<byte, SolidColorBrush>();
+        public static Color InkColor(byte a) { return Light ? Color.FromArgb(a, 0x16, 0x16, 0x1C) : Color.FromArgb(a, 255, 255, 255); }
+        public static SolidColorBrush Ink(byte a)
+        {
+            SolidColorBrush b;
+            if (!inks.TryGetValue(a, out b)) { b = new SolidColorBrush(InkColor(a)); inks[a] = b; }
+            return b;
+        }
+        public static SolidColorBrush Fg { get { return Ink(0xFF); } }
+
+        // teks berwarna biru: biru terang di latar gelap, biru tua di latar putih
+        static SolidColorBrush accentInk;
+        static Color AccentInkColor() { return Light ? Color.FromRgb(0x00, 0x5F, 0xB8) : Color.FromRgb(0x60, 0xCD, 0xFF); }
+        public static SolidColorBrush AccentInk { get { if (accentInk == null) accentInk = new SolidColorBrush(AccentInkColor()); return accentInk; } }
+
+        public static void SetTheme(string t)
+        {
+            t = NormTheme(t);
+            if (themeApplied && t == Theme) return;
+            themeApplied = true;
+            Theme = t;
+            foreach (KeyValuePair<byte, SolidColorBrush> kv in inks) kv.Value.Color = InkColor(kv.Key);
+            if (accentInk != null) accentInk.Color = AccentInkColor();
+            if (Application.Current != null) ApplyMenuStyle(Application.Current);
         }
 
         // tooltip dock: muncul tepat di atas ikon (atau di sampingnya untuk dock kiri/kanan), bukan di bawah kursor
@@ -1500,7 +1542,7 @@ namespace SlideDock
 
         public static void Hover(Border b, byte alpha)
         {
-            b.MouseEnter += delegate { b.Background = new SolidColorBrush(Color.FromArgb(alpha, 255, 255, 255)); };
+            b.MouseEnter += delegate { b.Background = UI.Ink(alpha); };
             b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
         }
     }
@@ -1523,12 +1565,12 @@ namespace SlideDock
             th = Math.Max(2, Math.Round(size * 0.11 * 2) / 2);
             Width = d;
             Height = d;
-            track.Stroke = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            track.Stroke = UI.Ink(0x40);
             track.StrokeThickness = th;
             arc.StrokeThickness = th;
             arc.StrokeStartLineCap = PenLineCap.Round;
             arc.StrokeEndLineCap = PenLineCap.Round;
-            num.Foreground = Brushes.White;
+            num.Foreground = UI.Fg;
             num.FontFamily = UI.Text;
             num.FontWeight = FontWeights.SemiBold;
             num.HorizontalAlignment = HorizontalAlignment.Center;
@@ -1563,7 +1605,7 @@ namespace SlideDock
             num.Text = pct.ToString();
             bolt.Visibility = charging ? Visibility.Visible : Visibility.Collapsed;
             num.FontSize = d * (pct >= 100 ? 0.33 : 0.4);
-            arc.Stroke = new SolidColorBrush(!charging && pct <= 20 ? Red : Colors.White);
+            arc.Stroke = !charging && pct <= 20 ? (Brush)new SolidColorBrush(Red) : UI.Fg;
             double r = (d - th) / 2, c = d / 2;
             if (pct >= 100) { arc.Data = new EllipseGeometry(new Point(c, c), r, r); return; }
             if (pct <= 0) { arc.Data = null; return; }
@@ -1757,7 +1799,7 @@ namespace SlideDock
                 cards = new List<Border> { c0 };
             }
             bool dark = UI.Theme == "dark";
-            bool aurora = UI.Theme == "aurora";
+            bool light = UI.Light;
             try
             {
                 PresentationSource ps = PresentationSource.FromVisual(this);
@@ -1784,7 +1826,7 @@ namespace SlideDock
                     foreach (Border c in cards)
                     {
                         c.Background = new SolidColorBrush(Color.FromArgb(0xF8, 0x1B, 0x1B, 0x21));
-                        c.BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+                        c.BorderBrush = UI.Ink(0x40);
                     }
                     return;
                 }
@@ -1800,8 +1842,9 @@ namespace SlideDock
                     Rect unit = new Rect(0, 0, 1, 1);
                     DrawingGroup dg = new DrawingGroup();
                     dg.Children.Add(new GeometryDrawing(ib, null, new RectangleGeometry(unit)));
-                    dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb((byte)(aurora ? 0x5A : 0x6E), 0x14, 0x14, 0x1C)), null, new RectangleGeometry(unit)));
-                    if (aurora) dg.Children.Add(new GeometryDrawing(UI.AuroraTint(0x58), null, new RectangleGeometry(unit)));
+                    // Glass 1: lapisan gelap tipis; Glass 2: lapisan putih tebal (teks hitam tetap jelas)
+                    Color tint = light ? Color.FromArgb(0x84, 0xF6, 0xF6, 0xF8) : Color.FromArgb(0x6E, 0x14, 0x14, 0x1C);
+                    dg.Children.Add(new GeometryDrawing(new SolidColorBrush(tint), null, new RectangleGeometry(unit)));
                     // aksen putih tipis: kabut putih merata + kilau dari atas yang turun pelan
                     dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb(0x10, 255, 255, 255)), null, new RectangleGeometry(unit)));
                     LinearGradientBrush gl = new LinearGradientBrush();
@@ -1821,7 +1864,17 @@ namespace SlideDock
                     edge.GradientStops.Add(new GradientStop(Color.FromArgb(0xA8, 255, 255, 255), 0));
                     edge.GradientStops.Add(new GradientStop(Color.FromArgb(0x58, 255, 255, 255), 0.4));
                     edge.GradientStops.Add(new GradientStop(Color.FromArgb(0x48, 255, 255, 255), 1));
-                    card.BorderBrush = aurora ? UI.AuroraEdge(0xC8) : edge;
+                    if (light)
+                    {
+                        // kaca putih: tepi atas putih terang, sisi lain garis abu tipis agar kartu tidak menyatu dengan latar
+                        edge = new LinearGradientBrush();
+                        edge.StartPoint = new Point(0, 0);
+                        edge.EndPoint = new Point(0, 1);
+                        edge.GradientStops.Add(new GradientStop(Color.FromArgb(0xFF, 255, 255, 255), 0));
+                        edge.GradientStops.Add(new GradientStop(Color.FromArgb(0x30, 0, 0, 0), 0.5));
+                        edge.GradientStops.Add(new GradientStop(Color.FromArgb(0x38, 0, 0, 0), 1));
+                    }
+                    card.BorderBrush = edge;
                 }
             }
             catch { }
@@ -2272,6 +2325,17 @@ namespace SlideDock
             return pct + "%" + (ps.PowerLineStatus == WF.PowerLineStatus.Online ? " (charging)" : "");
         }
 
+        // ikon baterai sesuai isi (0-100% dalam 11 tingkat), versi petir saat mengisi daya
+        public static string BatteryGlyph()
+        {
+            WF.PowerStatus ps = WF.SystemInformation.PowerStatus;
+            if ((ps.BatteryChargeStatus & WF.BatteryChargeStatus.NoSystemBattery) != 0 || ps.BatteryLifePercent > 1.0f) return "\uE83E";
+            int lvl = Math.Max(0, Math.Min(10, (int)Math.Round(ps.BatteryLifePercent * 10)));
+            if (ps.PowerLineStatus == WF.PowerLineStatus.Online)
+                return lvl == 10 ? "\uEA93" : lvl == 9 ? "\uE83E" : ((char)(0xE85A + lvl)).ToString();
+            return lvl == 10 ? "\uE83F" : ((char)(0xE850 + lvl)).ToString();
+        }
+
         public static string DiskText()
         {
             try
@@ -2306,7 +2370,7 @@ namespace SlideDock
             if (vertical)
             {
                 Width = 46;
-                track.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+                track.Background = UI.Ink(0x26);
                 fill.Background = accent;
                 fill.VerticalAlignment = VerticalAlignment.Bottom;
                 track.Child = fill;
@@ -2325,7 +2389,7 @@ namespace SlideDock
             Height = 26;
             track.Height = 4;
             track.CornerRadius = new CornerRadius(2);
-            track.Background = new SolidColorBrush(Color.FromArgb(0x50, 255, 255, 255));
+            track.Background = UI.Ink(0x50);
             track.VerticalAlignment = VerticalAlignment.Center;
             track.Margin = new Thickness(8, 0, 8, 0);
             fill.Height = 4;
@@ -2479,7 +2543,7 @@ namespace SlideDock
         {
             TextBlock t = new TextBlock();
             t.Text = text;
-            t.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            t.Foreground = UI.Ink(0xB0);
             t.FontSize = 12.5;
             t.FontWeight = FontWeights.SemiBold;
             t.FontFamily = UI.Text;
@@ -2491,7 +2555,7 @@ namespace SlideDock
         {
             TextBlock t = new TextBlock();
             t.Text = text;
-            t.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+            t.Foreground = UI.Ink(0x90);
             t.FontSize = 13;
             t.FontFamily = UI.Text;
             t.TextWrapping = TextWrapping.Wrap;
@@ -2520,7 +2584,7 @@ namespace SlideDock
             RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
             TextBlock tb = new TextBlock();
             tb.Text = name;
-            tb.Foreground = Brushes.White;
+            tb.Foreground = UI.Fg;
             tb.FontSize = 11.5;
             tb.FontFamily = UI.Text;
             tb.TextAlignment = TextAlignment.Center;
@@ -2561,7 +2625,7 @@ namespace SlideDock
             txt.Margin = new Thickness(10, 0, 0, 0);
             TextBlock t = new TextBlock();
             t.Text = title;
-            t.Foreground = Brushes.White;
+            t.Foreground = UI.Fg;
             t.FontSize = 13.5;
             t.FontFamily = UI.Text;
             txt.Children.Add(t);
@@ -2569,7 +2633,7 @@ namespace SlideDock
             {
                 TextBlock s = new TextBlock();
                 s.Text = sub;
-                s.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+                s.Foreground = UI.Ink(0x90);
                 s.FontSize = 11;
                 s.FontFamily = UI.Text;
                 s.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -2641,7 +2705,7 @@ namespace SlideDock
 
             Border sBox = new Border();
             sBox.CornerRadius = new CornerRadius(14);
-            sBox.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            sBox.Background = UI.Ink(0x26);
             sBox.Padding = new Thickness(12, 9, 14, 9);
             sBox.Margin = new Thickness(0, 0, 0, 8);
             Grid sGrid = new Grid();
@@ -2653,12 +2717,12 @@ namespace SlideDock
             sGrid.Children.Add(lens);
             search.Background = Brushes.Transparent;
             search.BorderThickness = new Thickness(0);
-            search.Foreground = Brushes.White;
-            search.CaretBrush = Brushes.White;
+            search.Foreground = UI.Fg;
+            search.CaretBrush = UI.Fg;
             search.FontSize = 15;
             search.FontFamily = UI.Text;
             hint.Text = "Search apps, files, or the web";
-            hint.Foreground = new SolidColorBrush(Color.FromArgb(0x99, 255, 255, 255));
+            hint.Foreground = UI.Ink(0x99);
             hint.FontSize = 15;
             hint.FontFamily = UI.Text;
             hint.IsHitTestVisible = false;
@@ -2844,11 +2908,11 @@ namespace SlideDock
         readonly TextBlock date = new TextBlock();
         readonly TextBlock wifiInfo = new TextBlock();
         readonly TextBlock batInfo = new TextBlock();
+        readonly TextBlock batGlyph = UI.Glyph("\uE83F", 14);
         readonly TextBlock diskInfo = new TextBlock();
         readonly DispatcherTimer clockTimer = new DispatcherTimer();
         bool addMode;
         readonly WrapPanel trayWrap = new WrapPanel();
-        public Action OnTrayFull;
 
         // Dock settings: menggantikan daftar app (kiri) & tombol daya (kanan bawah) sampai "Done" diklik.
         // Tiap pilihan langsung berlaku.
@@ -2885,7 +2949,7 @@ namespace SlideDock
             head.Margin = new Thickness(6, 0, 0, 8);
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            leftTitle.Foreground = Brushes.White;
+            leftTitle.Foreground = UI.Fg;
             leftTitle.FontSize = 16;
             leftTitle.FontWeight = FontWeights.SemiBold;
             leftTitle.FontFamily = UI.Text;
@@ -2894,14 +2958,14 @@ namespace SlideDock
             Border addBtn = new Border();
             addBtn.CornerRadius = new CornerRadius(10);
             addBtn.Padding = new Thickness(12, 6, 12, 6);
-            addBtn.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            addBtn.Background = UI.Ink(0x26);
             addBtn.Cursor = Cursors.Hand;
-            addText.Foreground = Brushes.White;
+            addText.Foreground = UI.Fg;
             addText.FontSize = 12.5;
             addText.FontFamily = UI.Text;
             addBtn.Child = addText;
-            addBtn.MouseEnter += delegate { addBtn.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255)); };
-            addBtn.MouseLeave += delegate { addBtn.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255)); };
+            addBtn.MouseEnter += delegate { addBtn.Background = UI.Ink(0x40); };
+            addBtn.MouseLeave += delegate { addBtn.Background = UI.Ink(0x26); };
             addBtn.MouseLeftButtonUp += delegate
             {
                 addMode = !addMode;
@@ -2914,13 +2978,13 @@ namespace SlideDock
             left.Children.Add(head);
 
             filterBox.CornerRadius = new CornerRadius(12);
-            filterBox.Background = new SolidColorBrush(Color.FromArgb(0x20, 255, 255, 255));
+            filterBox.Background = UI.Ink(0x20);
             filterBox.Padding = new Thickness(12, 7, 12, 7);
             filterBox.Margin = new Thickness(4, 0, 4, 8);
             filter.Background = Brushes.Transparent;
             filter.BorderThickness = new Thickness(0);
-            filter.Foreground = Brushes.White;
-            filter.CaretBrush = Brushes.White;
+            filter.Foreground = UI.Fg;
+            filter.CaretBrush = UI.Fg;
             filter.FontSize = 13.5;
             filter.FontFamily = UI.Text;
             filter.ToolTip = "Filter apps";
@@ -2937,6 +3001,12 @@ namespace SlideDock
             left.Children.Add(sv);
             settingsScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             settingsScroll.Content = settingsList;
+            // scroll bawaan (3 baris = 48 px per putaran) terasa terlalu cepat di daftar pengaturan: 20 px per putaran
+            settingsScroll.PreviewMouseWheel += delegate(object o, MouseWheelEventArgs e)
+            {
+                e.Handled = true;
+                settingsScroll.ScrollToVerticalOffset(settingsScroll.VerticalOffset - e.Delta / 120.0 * 20);
+            };
             settingsList.Margin = new Thickness(6, 0, 14, 8);
             settingsScroll.Visibility = Visibility.Collapsed;
             Grid.SetRowSpan(settingsScroll, 3);
@@ -2946,8 +3016,8 @@ namespace SlideDock
             // ---- kanan: info & daya ----
             Border right = new Border();
             right.CornerRadius = new CornerRadius(0, 23, 23, 0);
-            right.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255));
-            right.BorderBrush = new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255));
+            right.Background = UI.Ink(0x14);
+            right.BorderBrush = UI.Ink(0x22);
             right.BorderThickness = new Thickness(1, 0, 0, 0);
             right.Padding = new Thickness(18, 20, 18, 16);
             Grid.SetColumn(right, 1);
@@ -2957,7 +3027,7 @@ namespace SlideDock
             DockPanel.SetDock(power, Dock.Bottom);
             TextBlock pt = new TextBlock();
             pt.Visibility = Visibility.Collapsed;
-            pt.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            pt.Foreground = UI.Ink(0xB0);
             pt.FontSize = 12;
             pt.FontWeight = FontWeights.SemiBold;
             pt.FontFamily = UI.Text;
@@ -2994,15 +3064,15 @@ namespace SlideDock
             rp.Children.Add(power);
 
             StackPanel info = new StackPanel();
-            greet.Foreground = new SolidColorBrush(Color.FromArgb(0xC0, 255, 255, 255));
+            greet.Foreground = UI.Ink(0xC0);
             greet.FontSize = 13;
             greet.FontFamily = UI.Text;
-            clock.Foreground = Brushes.White;
+            clock.Foreground = UI.Fg;
             clock.FontSize = 40;
             clock.FontWeight = FontWeights.SemiBold;
             clock.FontFamily = UI.Text;
             clock.Margin = new Thickness(0, 2, 0, 0);
-            date.Foreground = new SolidColorBrush(Color.FromArgb(0xC0, 255, 255, 255));
+            date.Foreground = UI.Ink(0xC0);
             date.FontSize = 12.5;
             date.FontFamily = UI.Text;
             date.TextWrapping = TextWrapping.Wrap;
@@ -3022,7 +3092,7 @@ namespace SlideDock
             pcBtn.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open("ms-settings:"); };
             icons.Children.Add(pcBtn);
             dockSettingsRow = IconBtn("\uE771", "Dock settings");
-            dockSettingsRow.MouseEnter += delegate { if (!settingsMode) dockSettingsRow.Background = new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)); };
+            dockSettingsRow.MouseEnter += delegate { if (!settingsMode) dockSettingsRow.Background = UI.Ink(0x30); };
             dockSettingsRow.MouseLeave += delegate { if (!settingsMode) dockSettingsRow.Background = Brushes.Transparent; };
             dockSettingsRow.MouseLeftButtonUp += delegate { SetSettingsMode(!settingsMode); };
             icons.Children.Add(dockSettingsRow);
@@ -3042,14 +3112,14 @@ namespace SlideDock
             Border sep = new Border();
             sep.Height = 1;
             sep.Margin = new Thickness(0, 16, 0, 12);
-            sep.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            sep.Background = UI.Ink(0x26);
             info.Children.Add(sep);
-            info.Children.Add(InfoRow("", wifiInfo));
-            info.Children.Add(InfoRow("", batInfo));
-            info.Children.Add(InfoRow("", diskInfo));
+            info.Children.Add(InfoRow("", wifiInfo, null));
+            info.Children.Add(InfoRow("", batInfo, batGlyph));
+            info.Children.Add(InfoRow("", diskInfo, null));
             TextBlock trayTitle = new TextBlock();
             trayTitle.Text = "Running in background";
-            trayTitle.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            trayTitle.Foreground = UI.Ink(0xB0);
             trayTitle.FontSize = 12;
             trayTitle.FontWeight = FontWeights.SemiBold;
             trayTitle.FontFamily = UI.Text;
@@ -3085,6 +3155,7 @@ namespace SlideDock
         public Action OnUpdate;
         readonly Border updateBar = new Border();
         readonly TextBlock updateText = new TextBlock();
+        readonly TextBlock updateNotes = new TextBlock();
         readonly Border updateBtn = new Border();
         readonly TextBlock updateBtnText = new TextBlock();
 
@@ -3100,7 +3171,14 @@ namespace SlideDock
             Grid g = new Grid();
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            updateText.Foreground = Brushes.White;
+            updateNotes.Foreground = UI.Ink(0xC8);
+            updateNotes.FontSize = 11.5;
+            updateNotes.FontFamily = UI.Text;
+            updateNotes.TextWrapping = TextWrapping.Wrap;
+            updateNotes.LineHeight = 16;
+            updateNotes.Margin = new Thickness(0, 7, 0, 1);
+            updateNotes.Visibility = Visibility.Collapsed;
+            updateText.Foreground = UI.Fg;
             updateText.FontSize = 12.5;
             updateText.FontFamily = UI.Text;
             updateText.TextWrapping = TextWrapping.Wrap;
@@ -3121,7 +3199,10 @@ namespace SlideDock
             updateBtn.MouseLeftButtonUp += delegate { if (OnUpdate != null) OnUpdate(); };
             Grid.SetColumn(updateBtn, 1);
             g.Children.Add(updateBtn);
-            updateBar.Child = g;
+            StackPanel ub = new StackPanel();
+            ub.Children.Add(g);
+            ub.Children.Add(updateNotes);
+            updateBar.Child = ub;
         }
 
         // dipanggil setiap status update berubah
@@ -3133,6 +3214,8 @@ namespace SlideDock
             {
                 updateText.Text = Updater.Busy ? "Downloading SlideDock " + u.Ver.ToString(3) + "..." : "SlideDock " + u.Ver.ToString(3) + " is available";
                 updateBtn.Visibility = Updater.Busy ? Visibility.Collapsed : Visibility.Visible;
+                updateNotes.Text = string.Join("\n", u.Notes.Select(x => "\u2022  " + x).ToArray());
+                updateNotes.Visibility = u.Notes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
             }
             if (settingsMode && IsOpen) RenderSettings();
         }
@@ -3151,15 +3234,16 @@ namespace SlideDock
             return b;
         }
 
-        FrameworkElement InfoRow(string glyph, TextBlock text)
+        FrameworkElement InfoRow(string glyph, TextBlock text, TextBlock icon)
         {
             StackPanel r = new StackPanel();
             r.Orientation = Orientation.Horizontal;
             r.Margin = new Thickness(0, 4, 0, 4);
-            TextBlock g = UI.Glyph(glyph, 14);
+            TextBlock g = icon ?? UI.Glyph(glyph, 14);
+            g.Text = glyph;
             g.Width = 20;
             g.Opacity = 0.85;
-            text.Foreground = Brushes.White;
+            text.Foreground = UI.Fg;
             text.FontSize = 12.5;
             text.FontFamily = UI.Text;
             text.TextWrapping = TextWrapping.Wrap;
@@ -3194,7 +3278,7 @@ namespace SlideDock
             if (t != null)
             {
                 t.Text = up ? upLabel : normal;
-                t.Foreground = up ? new SolidColorBrush(Color.FromRgb(0xFF, 0xB8, 0x66)) : new SolidColorBrush(Color.FromArgb(0xC0, 255, 255, 255));
+                t.Foreground = up ? new SolidColorBrush(Color.FromRgb(0xFF, 0xB8, 0x66)) : UI.Ink(0xC0);
             }
             sp.ToolTip = up ? "Windows updates will be installed" : normal;
         }
@@ -3208,14 +3292,14 @@ namespace SlideDock
             b.Width = 40;
             b.Height = 40;
             b.CornerRadius = new CornerRadius(20);
-            b.Background = new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255));
+            b.Background = UI.Ink(0x22);
             b.Child = UI.Glyph(glyph, 15);
             b.HorizontalAlignment = HorizontalAlignment.Center;
-            sp.MouseEnter += delegate { b.Background = new SolidColorBrush(Color.FromArgb(0x45, 255, 255, 255)); };
-            sp.MouseLeave += delegate { b.Background = new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255)); };
+            sp.MouseEnter += delegate { b.Background = UI.Ink(0x45); };
+            sp.MouseLeave += delegate { b.Background = UI.Ink(0x22); };
             TextBlock t = new TextBlock();
             t.Text = label;
-            t.Foreground = new SolidColorBrush(Color.FromArgb(0xC0, 255, 255, 255));
+            t.Foreground = UI.Ink(0xC0);
             t.FontSize = 10;
             t.FontFamily = UI.Text;
             t.HorizontalAlignment = HorizontalAlignment.Center;
@@ -3322,7 +3406,7 @@ namespace SlideDock
             {
                 TextBlock n = new TextBlock();
                 n.Text = "None";
-                n.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+                n.Foreground = UI.Ink(0x90);
                 n.FontSize = 12;
                 n.FontFamily = UI.Text;
                 n.Margin = new Thickness(6, 2, 0, 0);
@@ -3334,6 +3418,7 @@ namespace SlideDock
         {
             UpdateClock();
             batInfo.Text = "Battery " + SysInfo.BatteryText();
+            batGlyph.Text = SysInfo.BatteryGlyph();
             diskInfo.Text = "Disk C: " + SysInfo.DiskText();
             UpdatePowerLabels();
             FillTray();
@@ -3358,7 +3443,7 @@ namespace SlideDock
             powerGrid.Visibility = apps;
             settingsScroll.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
             doneBtn.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
-            dockSettingsRow.Background = on ? new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255)) : Brushes.Transparent;
+            dockSettingsRow.Background = on ? UI.Ink(0x30) : Brushes.Transparent;
             if (on) { RenderSettings(); settingsScroll.ScrollToTop(); }
             else if (addMode) { addMode = false; filter.Text = ""; Rebuild(); }
         }
@@ -3376,7 +3461,7 @@ namespace SlideDock
             settingsList.Children.Clear();
             TextBlock title = new TextBlock();
             title.Text = "Dock settings";
-            title.Foreground = Brushes.White;
+            title.Foreground = UI.Fg;
             title.FontSize = 16;
             title.FontWeight = FontWeights.SemiBold;
             title.FontFamily = UI.Text;
@@ -3384,7 +3469,7 @@ namespace SlideDock
             settingsList.Children.Add(title);
             TextBlock hint = new TextBlock();
             hint.Text = "Changes apply right away.";
-            hint.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+            hint.Foreground = UI.Ink(0x90);
             hint.FontSize = 12;
             hint.FontFamily = UI.Text;
             settingsList.Children.Add(hint);
@@ -3397,7 +3482,7 @@ namespace SlideDock
                     section = s.Section;
                     TextBlock h = new TextBlock();
                     h.Text = section.ToUpperInvariant();
-                    h.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+                    h.Foreground = UI.Ink(0x90);
                     h.FontSize = 11;
                     h.FontWeight = FontWeights.SemiBold;
                     h.FontFamily = UI.Text;
@@ -3413,7 +3498,7 @@ namespace SlideDock
             if (s.Input) return InputRow(s);
             Border row = new Border();
             row.CornerRadius = new CornerRadius(12);
-            row.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255));
+            row.Background = UI.Ink(0x14);
             row.Padding = new Thickness(14, 8, 8, 8);
             row.Margin = new Thickness(0, 0, 0, 4);
             row.MinHeight = 46;
@@ -3422,7 +3507,7 @@ namespace SlideDock
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             TextBlock label = new TextBlock();
             label.Text = s.Label;
-            label.Foreground = Brushes.White;
+            label.Foreground = UI.Fg;
             label.FontSize = 13;
             label.FontFamily = UI.Text;
             label.VerticalAlignment = VerticalAlignment.Center;
@@ -3433,8 +3518,8 @@ namespace SlideDock
             {
                 // tautan: seluruh baris bisa diklik
                 row.Cursor = Cursors.Hand;
-                row.MouseEnter += delegate { row.Background = new SolidColorBrush(Color.FromArgb(0x2A, 255, 255, 255)); };
-                row.MouseLeave += delegate { row.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255)); };
+                row.MouseEnter += delegate { row.Background = UI.Ink(0x2A); };
+                row.MouseLeave += delegate { row.Background = UI.Ink(0x14); };
                 TextBlock chev = UI.Glyph("\uE76C", 11);
                 chev.Opacity = 0.7;
                 chev.Margin = new Thickness(0, 0, 6, 0);
@@ -3446,7 +3531,7 @@ namespace SlideDock
             }
             if (!s.Toggle && s.Choices == null)
             {
-                label.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));   // baris info saja
+                label.Foreground = UI.Ink(0xB0);   // baris info saja
                 label.TextWrapping = TextWrapping.Wrap;
                 label.FontSize = 12;
                 return row;
@@ -3458,7 +3543,7 @@ namespace SlideDock
             {
                 Border seg = new Border();
                 seg.CornerRadius = new CornerRadius(10);
-                seg.Background = new SolidColorBrush(Color.FromArgb(0x1E, 255, 255, 255));
+                seg.Background = UI.Ink(0x1E);
                 seg.Padding = new Thickness(3);
                 StackPanel sp = new StackPanel();
                 sp.Orientation = Orientation.Horizontal;
@@ -3477,7 +3562,7 @@ namespace SlideDock
                     bt.FontSize = 12.5;
                     bt.FontFamily = UI.Text;
                     bt.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
-                    bt.Foreground = on ? Brushes.Black : Brushes.White;
+                    bt.Foreground = on ? Brushes.Black : UI.Fg;
                     b.Child = bt;
                     b.MouseLeftButtonUp += delegate { if (idx == cur) return; s.Set(idx); RenderSettings(); };
                     sp.Children.Add(b);
@@ -3495,13 +3580,13 @@ namespace SlideDock
         {
             Border row = new Border();
             row.CornerRadius = new CornerRadius(12);
-            row.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255));
+            row.Background = UI.Ink(0x14);
             row.Padding = new Thickness(14, 10, 10, 10);
             row.Margin = new Thickness(0, 0, 0, 4);
             StackPanel col = new StackPanel();
             TextBlock label = new TextBlock();
             label.Text = s.Label;
-            label.Foreground = Brushes.White;
+            label.Foreground = UI.Fg;
             label.FontSize = 13;
             label.FontFamily = UI.Text;
             label.Margin = new Thickness(0, 0, 0, 8);
@@ -3511,19 +3596,19 @@ namespace SlideDock
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             Border box = new Border();
             box.CornerRadius = new CornerRadius(8);
-            box.Background = new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255));
+            box.Background = UI.Ink(0x22);
             box.Padding = new Thickness(8, 5, 8, 5);
             Grid inner = new Grid();
             TextBox tb = new TextBox();
             tb.Background = Brushes.Transparent;
             tb.BorderThickness = new Thickness(0);
-            tb.Foreground = Brushes.White;
-            tb.CaretBrush = Brushes.White;
+            tb.Foreground = UI.Fg;
+            tb.CaretBrush = UI.Fg;
             tb.FontSize = 12.5;
             tb.FontFamily = UI.Text;
             TextBlock hint = new TextBlock();
             hint.Text = s.Placeholder ?? "";
-            hint.Foreground = new SolidColorBrush(Color.FromArgb(0x70, 255, 255, 255));
+            hint.Foreground = UI.Ink(0x70);
             hint.FontSize = 12.5;
             hint.FontFamily = UI.Text;
             hint.IsHitTestVisible = false;
@@ -3568,12 +3653,12 @@ namespace SlideDock
             b.Margin = new Thickness(0, 0, 6, 0);
             b.CornerRadius = new CornerRadius(11);
             b.Cursor = Cursors.Hand;
-            b.Background = on ? new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            b.Background = on ? new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : UI.Ink(0x40);
             Border knob = new Border();
             knob.Width = 16;
             knob.Height = 16;
             knob.CornerRadius = new CornerRadius(8);
-            knob.Background = on ? Brushes.Black : Brushes.White;
+            knob.Background = on ? Brushes.Black : UI.Fg;
             knob.Margin = new Thickness(3);
             knob.HorizontalAlignment = on ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             b.Child = knob;
@@ -4223,7 +4308,7 @@ namespace SlideDock
             head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             TextBlock title = new TextBlock();
             title.Text = "Wi-Fi";
-            title.Foreground = Brushes.White;
+            title.Foreground = UI.Fg;
             title.FontSize = 15;
             title.FontWeight = FontWeights.SemiBold;
             title.FontFamily = UI.Text;
@@ -4235,7 +4320,7 @@ namespace SlideDock
             head.Children.Add(refresh);
             sp.Children.Add(head);
 
-            status.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            status.Foreground = UI.Ink(0xB0);
             status.FontSize = 12;
             status.FontFamily = UI.Text;
             status.TextWrapping = TextWrapping.Wrap;
@@ -4267,7 +4352,7 @@ namespace SlideDock
             sr.Children.Add(UI.Glyph("", 13));
             TextBlock st = new TextBlock();
             st.Text = "Network settings";
-            st.Foreground = Brushes.White;
+            st.Foreground = UI.Fg;
             st.FontSize = 12.5;
             st.FontFamily = UI.Text;
             st.Margin = new Thickness(10, 0, 0, 0);
@@ -4339,13 +4424,13 @@ namespace SlideDock
             b.VerticalAlignment = VerticalAlignment.Center;
             b.Cursor = busy ? Cursors.Arrow : Cursors.Hand;
             b.ToolTip = busy ? (n.Connected ? "Disconnecting..." : "Connecting...") : n.Connected ? "Disconnect" : "Connect";
-            Color normal = n.Connected ? Color.FromRgb(0x60, 0xCD, 0xFF) : Color.FromArgb(0x26, 255, 255, 255);
-            Color hover = n.Connected ? Color.FromRgb(0x7D, 0xD8, 0xFF) : Color.FromArgb(0x48, 255, 255, 255);
-            b.Background = new SolidColorBrush(normal);
+            Brush normal = n.Connected ? (Brush)new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : UI.Ink(0x26);
+            Brush hover = n.Connected ? (Brush)new SolidColorBrush(Color.FromRgb(0x7D, 0xD8, 0xFF)) : UI.Ink(0x48);
+            b.Background = normal;
             if (!busy)
             {
-                b.MouseEnter += delegate { b.Background = new SolidColorBrush(hover); };
-                b.MouseLeave += delegate { b.Background = new SolidColorBrush(normal); };
+                b.MouseEnter += delegate { b.Background = hover; };
+                b.MouseLeave += delegate { b.Background = normal; };
             }
             TextBlock g = UI.Glyph(busy ? "" : "", 14);
             if (n.Connected) g.Foreground = Brushes.Black;
@@ -4361,7 +4446,7 @@ namespace SlideDock
             b.Padding = new Thickness(10, 6, 6, 6);
             b.Margin = new Thickness(0, 1, 0, 1);
             bool open = expanded == n.Ssid;
-            b.Background = open ? new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255)) : Brushes.Transparent;
+            b.Background = open ? UI.Ink(0x26) : Brushes.Transparent;
             Grid g = new Grid();
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -4376,7 +4461,7 @@ namespace SlideDock
             txt.VerticalAlignment = VerticalAlignment.Center;
             TextBlock name = new TextBlock();
             name.Text = n.Ssid;
-            name.Foreground = Brushes.White;
+            name.Foreground = UI.Fg;
             name.FontSize = 13.5;
             name.FontFamily = UI.Text;
             name.FontWeight = n.Connected ? FontWeights.SemiBold : FontWeights.Normal;
@@ -4384,7 +4469,7 @@ namespace SlideDock
             txt.Children.Add(name);
             TextBlock sub = new TextBlock();
             sub.Text = (n.Connected ? "Connected" : Wifi.IsOpen(n) ? "Open" : "Secured") + (n.Known && !n.Connected ? " · saved" : "") + " · " + n.Signal + "%";
-            sub.Foreground = new SolidColorBrush(n.Connected ? Color.FromRgb(0x60, 0xCD, 0xFF) : Color.FromArgb(0x90, 255, 255, 255));
+            sub.Foreground = n.Connected ? (Brush)UI.AccentInk : UI.Ink(0x90);
             sub.FontSize = 11;
             sub.FontFamily = UI.Text;
             txt.Children.Add(sub);
@@ -4412,20 +4497,20 @@ namespace SlideDock
                 act.Margin = new Thickness(42, 4, 6, 8);
                 Border pwBox = new Border();
                 pwBox.CornerRadius = new CornerRadius(9);
-                pwBox.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+                pwBox.Background = UI.Ink(0x26);
                 pwBox.Padding = new Thickness(10, 6, 10, 6);
                 pw = new PasswordBox();
                 pw.Background = Brushes.Transparent;
                 pw.BorderThickness = new Thickness(0);
-                pw.Foreground = Brushes.White;
-                pw.CaretBrush = Brushes.White;
+                pw.Foreground = UI.Fg;
+                pw.CaretBrush = UI.Fg;
                 pw.FontSize = 13;
                 pw.ToolTip = "Network password";
                 pwBox.Child = pw;
                 act.Children.Add(pwBox);
                 TextBlock hint = new TextBlock();
                 hint.Text = "Type the password, then press Enter or the link icon";
-                hint.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+                hint.Foreground = UI.Ink(0x90);
                 hint.FontSize = 11;
                 hint.FontFamily = UI.Text;
                 hint.TextWrapping = TextWrapping.Wrap;
@@ -4571,13 +4656,13 @@ namespace SlideDock
             Border sep = new Border();
             sep.Height = 1;
             sep.Margin = new Thickness(0, 12, 0, 8);
-            sep.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            sep.Background = UI.Ink(0x26);
             sp.Children.Add(sep);
 
             Grid foot = new Grid();
             foot.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             foot.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            batText.Foreground = Brushes.White;
+            batText.Foreground = UI.Fg;
             batText.FontSize = 12.5;
             batText.FontFamily = UI.Text;
             batText.VerticalAlignment = VerticalAlignment.Center;
@@ -4601,7 +4686,7 @@ namespace SlideDock
             two.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             two.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             two.Children.Add(sp);
-            wifiArea.BorderBrush = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            wifiArea.BorderBrush = UI.Ink(0x26);
             wifiArea.BorderThickness = new Thickness(1, 0, 0, 0);
             wifiArea.Margin = new Thickness(0, 14, 0, 12);
             wifiArea.Padding = new Thickness(14, 0, 14, 0);
@@ -4649,7 +4734,7 @@ namespace SlideDock
         {
             TextBlock t = new TextBlock();
             t.Text = text;
-            t.Foreground = Brushes.White;
+            t.Foreground = UI.Fg;
             t.FontSize = 15;
             t.FontWeight = FontWeights.SemiBold;
             t.FontFamily = UI.Text;
@@ -4671,7 +4756,7 @@ namespace SlideDock
             if (glyph != null) sr.Children.Add(UI.Glyph(glyph, 13));
             TextBlock t = new TextBlock();
             t.Text = text;
-            t.Foreground = Brushes.White;
+            t.Foreground = UI.Fg;
             t.FontSize = 12.5;
             t.FontFamily = UI.Text;
             t.VerticalAlignment = VerticalAlignment.Center;
@@ -4695,7 +4780,7 @@ namespace SlideDock
             Border sep = new Border();
             sep.Height = 1;
             sep.Margin = new Thickness(0, 10, 0, 6);
-            sep.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            sep.Background = UI.Ink(0x26);
             f.Children.Add(sep);
             if (stacked)
             {
@@ -4763,7 +4848,7 @@ namespace SlideDock
             Detach(volPct);
             volume2 = new FlatSlider(Layout.V);
             volume2.Changed = delegate(double v) { SysInfo.SetVolume(v); volume.Value = v; UpdateVolIcon(); };
-            volPct.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            volPct.Foreground = UI.Ink(0xB0);
             volPct.FontSize = 12.5;
             volPct.FontFamily = UI.Text;
             volPct.VerticalAlignment = VerticalAlignment.Center;
@@ -4813,11 +4898,11 @@ namespace SlideDock
             bright2.Changed = onBright;
             bright2.Committed = onBrightDone;
             batteryView.Margin = new Thickness(16, 16, 16, 10);
-            batTitle.Foreground = Brushes.White;
+            batTitle.Foreground = UI.Fg;
             batTitle.FontSize = 20;
             batTitle.FontWeight = FontWeights.SemiBold;
             batTitle.FontFamily = UI.Text;
-            batSub.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            batSub.Foreground = UI.Ink(0xB0);
             batSub.FontSize = 12;
             batSub.FontFamily = UI.Text;
             batSub.TextWrapping = TextWrapping.Wrap;
@@ -4966,16 +5051,16 @@ namespace SlideDock
             b.Height = 72;
             b.Margin = new Thickness(3);
             b.CornerRadius = new CornerRadius(12);
-            b.Background = new SolidColorBrush(Color.FromArgb(0x1E, 255, 255, 255));
+            b.Background = UI.Ink(0x1E);
             b.Cursor = Cursors.Hand;
-            b.MouseEnter += delegate { b.Background = new SolidColorBrush(Color.FromArgb(0x38, 255, 255, 255)); };
-            b.MouseLeave += delegate { b.Background = new SolidColorBrush(Color.FromArgb(0x1E, 255, 255, 255)); };
+            b.MouseEnter += delegate { b.Background = UI.Ink(0x38); };
+            b.MouseLeave += delegate { b.Background = UI.Ink(0x1E); };
             StackPanel sp = new StackPanel();
             sp.VerticalAlignment = VerticalAlignment.Center;
             sp.Children.Add(UI.Glyph(glyph, 17));
             TextBlock t = new TextBlock();
             t.Text = label;
-            t.Foreground = Brushes.White;
+            t.Foreground = UI.Fg;
             t.FontSize = 11.5;
             t.FontFamily = UI.Text;
             t.HorizontalAlignment = HorizontalAlignment.Center;
@@ -4983,7 +5068,7 @@ namespace SlideDock
             sp.Children.Add(t);
             if (sub != null)
             {
-                sub.Foreground = new SolidColorBrush(Color.FromArgb(0xA0, 255, 255, 255));
+                sub.Foreground = UI.Ink(0xA0);
                 sub.FontSize = 10;
                 sub.FontFamily = UI.Text;
                 sub.HorizontalAlignment = HorizontalAlignment.Center;
@@ -5645,7 +5730,7 @@ namespace SlideDock
                 NotifItem it = n;
                 Border c = new Border();
                 c.CornerRadius = new CornerRadius(12);
-                c.Background = new SolidColorBrush(Color.FromArgb(0x1E, 255, 255, 255));
+                c.Background = UI.Ink(0x1E);
                 c.Padding = new Thickness(12, 9, 8, 10);
                 c.Margin = new Thickness(0, 0, 0, 6);
                 Grid g = new Grid();
@@ -5654,7 +5739,7 @@ namespace SlideDock
                 StackPanel tx = new StackPanel();
                 TextBlock app = new TextBlock();
                 app.Text = it.App + "  \u00B7  " + When(it.Time);
-                app.Foreground = new SolidColorBrush(Color.FromArgb(0xA0, 255, 255, 255));
+                app.Foreground = UI.Ink(0xA0);
                 app.FontSize = 11;
                 app.FontFamily = UI.Text;
                 tx.Children.Add(app);
@@ -5662,7 +5747,7 @@ namespace SlideDock
                 {
                     TextBlock ti = new TextBlock();
                     ti.Text = it.Title;
-                    ti.Foreground = Brushes.White;
+                    ti.Foreground = UI.Fg;
                     ti.FontSize = 13;
                     ti.FontWeight = FontWeights.SemiBold;
                     ti.FontFamily = UI.Text;
@@ -5674,7 +5759,7 @@ namespace SlideDock
                 {
                     TextBlock bo = new TextBlock();
                     bo.Text = it.Body;
-                    bo.Foreground = new SolidColorBrush(Color.FromArgb(0xD0, 255, 255, 255));
+                    bo.Foreground = UI.Ink(0xD0);
                     bo.FontSize = 12;
                     bo.FontFamily = UI.Text;
                     bo.TextWrapping = TextWrapping.Wrap;
@@ -5745,7 +5830,7 @@ namespace SlideDock
         public Action OnCalendarSettings;
         static readonly Brush HolidayRed = new SolidColorBrush(Color.FromRgb(0xFF, 0x6B, 0x6B));
         static readonly Brush Accent = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
-        static readonly Brush Muted = new SolidColorBrush(Color.FromArgb(0x99, 255, 255, 255));
+        static readonly Brush Muted = UI.Ink(0x99);
 
         // data hari libur/acara berubah (selesai diunduh): gambar ulang bila sedang tampil
         public void DataChanged() { if (IsOpen) Render(); }
@@ -5765,14 +5850,14 @@ namespace SlideDock
             nh.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             TextBlock nTitle = new TextBlock();
             nTitle.Text = "Notifications";
-            nTitle.Foreground = Brushes.White;
+            nTitle.Foreground = UI.Fg;
             nTitle.FontSize = 15;
             nTitle.FontWeight = FontWeights.SemiBold;
             nTitle.FontFamily = UI.Text;
             nTitle.VerticalAlignment = VerticalAlignment.Center;
             nh.Children.Add(nTitle);
             clearAll.Text = "Clear all";
-            clearAll.Foreground = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
+            clearAll.Foreground = UI.AccentInk;
             clearAll.FontSize = 12;
             clearAll.FontFamily = UI.Text;
             clearAll.Cursor = Cursors.Hand;
@@ -5790,9 +5875,9 @@ namespace SlideDock
             Border nsep = new Border();
             nsep.Height = 1;
             nsep.Margin = new Thickness(0, 10, 0, 12);
-            nsep.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            nsep.Background = UI.Ink(0x26);
 
-            title.Foreground = Brushes.White;
+            title.Foreground = UI.Fg;
             title.FontSize = 15;
             title.FontWeight = FontWeights.SemiBold;
             title.FontFamily = UI.Text;
@@ -5819,7 +5904,7 @@ namespace SlideDock
             };
             Grid.SetColumn(todayBtn, 1);
             head.Children.Add(todayBtn);
-            monthText.Foreground = Brushes.White;
+            monthText.Foreground = UI.Fg;
             monthText.FontSize = 13.5;
             monthText.FontFamily = UI.Text;
             monthText.VerticalAlignment = VerticalAlignment.Center;
@@ -5840,7 +5925,7 @@ namespace SlideDock
             {
                 TextBlock t = new TextBlock();
                 t.Text = d;
-                t.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+                t.Foreground = UI.Ink(0x90);
                 t.FontSize = 11;
                 t.FontFamily = UI.Text;
                 t.TextAlignment = TextAlignment.Center;
@@ -5864,7 +5949,7 @@ namespace SlideDock
             nr.Children.Add(UI.Glyph("\uEA8F", 14));
             TextBlock nt = new TextBlock();
             nt.Text = "Open notification center";
-            nt.Foreground = Brushes.White;
+            nt.Foreground = UI.Fg;
             nt.FontSize = 13;
             nt.FontFamily = UI.Text;
             nt.Margin = new Thickness(10, 0, 0, 0);
@@ -5945,9 +6030,9 @@ namespace SlideDock
             Border sep = new Border();
             sep.Height = 1;
             sep.Margin = new Thickness(0, 10, 0, 10);
-            sep.Background = new SolidColorBrush(Color.FromArgb(0x26, 255, 255, 255));
+            sep.Background = UI.Ink(0x26);
             p.Children.Add(sep);
-            dayTitle.Foreground = Brushes.White;
+            dayTitle.Foreground = UI.Fg;
             dayTitle.FontSize = 13.5;
             dayTitle.FontWeight = FontWeights.SemiBold;
             dayTitle.FontFamily = UI.Text;
@@ -6060,7 +6145,7 @@ namespace SlideDock
                 StackPanel tx = new StackPanel();
                 TextBlock title = new TextBlock();
                 title.Text = it.Title;
-                title.Foreground = Brushes.White;
+                title.Foreground = UI.Fg;
                 title.FontSize = 12.5;
                 title.FontFamily = UI.Text;
                 title.TextWrapping = TextWrapping.Wrap;
@@ -6136,7 +6221,7 @@ namespace SlideDock
                 }
                 else
                 {
-                    t.Foreground = red ? HolidayRed : Brushes.White;
+                    t.Foreground = red ? HolidayRed : UI.Fg;
                     if (holiday) t.FontWeight = FontWeights.SemiBold;
                 }
                 g.Children.Add(t);
@@ -6165,7 +6250,7 @@ namespace SlideDock
                 c.Child = g;
                 if (!isToday)
                 {
-                    c.MouseEnter += delegate { c.Background = new SolidColorBrush(Color.FromArgb(0x22, 255, 255, 255)); };
+                    c.MouseEnter += delegate { c.Background = UI.Ink(0x22); };
                     c.MouseLeave += delegate { c.Background = Brushes.Transparent; };
                 }
                 DateTime day = d;
@@ -6284,7 +6369,6 @@ namespace SlideDock
 
     class TrayPop : Popover
     {
-        public Action OnShowOriginal;
         readonly WrapPanel wrap = new WrapPanel();
         readonly TextBlock empty = new TextBlock();
 
@@ -6296,7 +6380,7 @@ namespace SlideDock
             wrap.MaxWidth = 6 * 38;
             sp.Children.Add(wrap);
             empty.Text = "No tray apps running.";
-            empty.Foreground = new SolidColorBrush(Color.FromArgb(0x90, 255, 255, 255));
+            empty.Foreground = UI.Ink(0x90);
             empty.FontSize = 12.5;
             empty.FontFamily = UI.Text;
             empty.Margin = new Thickness(6, 4, 6, 4);
@@ -6329,9 +6413,7 @@ namespace SlideDock
                 RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
                 b.Child = img;
                 b.MouseLeftButtonUp += delegate { HidePanel(); Launcher.Open(e.Exe); };
-                Tiles.Menu(b,
-                    "Open " + e.Tip, (Action)delegate { HidePanel(); Launcher.Open(e.Exe); },
-                    "Full tray menu...", (Action)delegate { HidePanel(); if (OnShowOriginal != null) OnShowOriginal(); });
+                Tiles.Menu(b, "Open " + e.Tip, (Action)delegate { HidePanel(); Launcher.Open(e.Exe); });
                 wrap.Children.Add(b);
             }
         }
@@ -6407,7 +6489,7 @@ namespace SlideDock
                 Native.SetWindowLong(hwnd, Native.GWL_EXSTYLE, ex | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW);
                 int round = 2;                                   // sudut membulat Windows 11
                 DwmSetWindowAttribute(hwnd, 33, ref round, 4);
-                int border = UI.Theme == "glass" ? 0x00A8A4A0 : 0x00504A48;   // garis tepi (BGR): terang untuk Glass
+                int border = UI.Theme == "glass2" ? 0x00C8C4C0 : UI.Theme == "glass" ? 0x00A8A4A0 : 0x00504A48;   // garis tepi (BGR): terang untuk Glass
                 DwmSetWindowAttribute(hwnd, 34, ref border, 4);
             };
             SizeChanged += delegate { Place(); ApplyGlass(); UpdateThumbs(); };
@@ -6465,7 +6547,7 @@ namespace SlideDock
             dragTimer.Stop();
             dragWin = card != null ? (IntPtr)card.Tag : IntPtr.Zero;
             if (card == null) return;
-            card.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            card.Background = UI.Ink(0x40);
             dragTimer.Start();
         }
 
@@ -6501,7 +6583,7 @@ namespace SlideDock
         void CaptureStrip()
         {
             cap = null;
-            if (UI.Theme != "glass") return;
+            if (UI.Theme == "dark") return;
             try
             {
                 capScale = ScrScale;
@@ -6531,9 +6613,9 @@ namespace SlideDock
         void ApplyGlass()
         {
             if (!IsVisible) return;
-            if (cap == null || UI.Theme != "glass")
+            if (cap == null || UI.Theme == "dark")
             {
-                Background = new SolidColorBrush(Color.FromRgb(0x20, 0x20, 0x26));
+                Background = new SolidColorBrush(UI.Light ? Color.FromRgb(0xF3, 0xF3, 0xF5) : Color.FromRgb(0x20, 0x20, 0x26));
                 return;
             }
             double s = capScale;
@@ -6544,7 +6626,7 @@ namespace SlideDock
             ib.Viewbox = new Rect((Left * s - capX) / capW, (Top * s - capY) / capH, ActualWidth * s / capW, ActualHeight * s / capH);
             DrawingGroup dg = new DrawingGroup();
             dg.Children.Add(new GeometryDrawing(ib, null, new RectangleGeometry(unit)));
-            dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb(0x6E, 0x14, 0x14, 0x1C)), null, new RectangleGeometry(unit)));
+            dg.Children.Add(new GeometryDrawing(new SolidColorBrush(UI.Light ? Color.FromArgb(0x84, 0xF6, 0xF6, 0xF8) : Color.FromArgb(0x6E, 0x14, 0x14, 0x1C)), null, new RectangleGeometry(unit)));
             LinearGradientBrush gl = new LinearGradientBrush();
             gl.StartPoint = new Point(0, 0);
             gl.EndPoint = new Point(0, 1);
@@ -6592,7 +6674,7 @@ namespace SlideDock
                 card.Background = Brushes.Transparent;
                 card.Cursor = Cursors.Hand;
                 card.Tag = win;
-                card.MouseEnter += delegate { card.Background = new SolidColorBrush(Color.FromArgb(0x2D, 255, 255, 255)); };
+                card.MouseEnter += delegate { card.Background = UI.Ink(0x2D); };
                 card.MouseLeave += delegate { card.Background = Brushes.Transparent; };
 
                 StackPanel col = new StackPanel();
@@ -6609,7 +6691,7 @@ namespace SlideDock
                 head.Children.Add(ic);
                 TextBlock title = new TextBlock();
                 title.Text = TitleOf(win);
-                title.Foreground = Brushes.White;
+                title.Foreground = UI.Fg;
                 title.FontSize = 12;
                 title.FontFamily = UI.Text;
                 title.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -6656,7 +6738,7 @@ namespace SlideDock
                 slot.Height = 124;
                 slot.Margin = new Thickness(0, 7, 0, 0);
                 slot.CornerRadius = new CornerRadius(6);
-                slot.Background = new SolidColorBrush(Color.FromArgb(0x14, 255, 255, 255));
+                slot.Background = UI.Ink(0x14);
                 Image big = new Image();
                 big.Source = appIcon;
                 big.Width = 34;
@@ -7107,7 +7189,7 @@ namespace SlideDock
                 if (File.Exists(ThemeFile))
                 {
                     string s = File.ReadAllText(ThemeFile).Trim();
-                    if (s == "dark" || s == "glass" || s == "aurora") Theme = s;
+                    Theme = UI.NormTheme(s);
                 }
             }
             catch { }
@@ -7115,6 +7197,7 @@ namespace SlideDock
 
         public void ApplyTheme(string th)
         {
+            th = UI.NormTheme(th);
             Theme = th;
             try { Directory.CreateDirectory(Store.Dir); File.WriteAllText(ThemeFile, th); } catch { }
             StyleSurfaces();
@@ -7203,22 +7286,16 @@ namespace SlideDock
                 WrapWithShape(fullCard, 20, out fullShape, out fullGloss);
                 WrapWithShape(notch, 14, out notchShape, out notchGloss);
             }
-            UI.Theme = Theme;
-            bool aurora = Theme == "aurora";
-            bool glass = Theme == "glass" || aurora;
+            UI.SetTheme(Theme);
+            bool light = Theme == "glass2";
+            bool glass = Theme == "glass" || light;
             foreach (System.Windows.Shapes.Path p in new System.Windows.Shapes.Path[] { fullShape, notchShape })
             {
-                if (aurora)
+                if (light)
                 {
-                    // lapisan gelap tipis di bawah gradasi warna agar ikon & teks tetap jelas
-                    DrawingGroup dg = new DrawingGroup();
-                    Rect unit = new Rect(0, 0, 1, 1);
-                    dg.Children.Add(new GeometryDrawing(new SolidColorBrush(Color.FromArgb(0x50, 0x14, 0x14, 0x1C)), null, new RectangleGeometry(unit)));
-                    dg.Children.Add(new GeometryDrawing(UI.AuroraTint(0x78), null, new RectangleGeometry(unit)));
-                    DrawingBrush db = new DrawingBrush(dg);
-                    db.Stretch = Stretch.Fill;
-                    p.Fill = db;
-                    p.Stroke = UI.AuroraEdge(0xD0);
+                    // Glass 2: kaca putih dominan, garis tepi abu tipis
+                    p.Fill = new SolidColorBrush(Color.FromArgb(0x96, 0xF6, 0xF6, 0xF8));
+                    p.Stroke = new SolidColorBrush(Color.FromArgb(0x38, 0, 0, 0));
                 }
                 else
                 {
@@ -7232,7 +7309,7 @@ namespace SlideDock
                 LinearGradientBrush g = new LinearGradientBrush();
                 g.StartPoint = Layout.Side == 1 ? new Point(1, 0) : new Point(0, 0);                       // kilau dari tepi luar
                 g.EndPoint = Layout.Side == 1 ? new Point(0, 0) : Layout.Side == 2 ? new Point(1, 0) : new Point(0, 1);
-                g.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(glass ? 0x30 : 0x00), 255, 255, 255), 0));
+                g.GradientStops.Add(new GradientStop(Color.FromArgb((byte)(light ? 0x70 : glass ? 0x30 : 0x00), 255, 255, 255), 0));
                 g.GradientStops.Add(new GradientStop(Color.FromArgb(0, 255, 255, 255), 0.6));
                 gl.Fill = g;
             }
@@ -7283,7 +7360,7 @@ namespace SlideDock
             notch.Margin = new Thickness(10, 10, 10, 4);
             notch.CornerRadius = new CornerRadius(15);
             notch.Background = new SolidColorBrush(Color.FromArgb(0xF2, 0x12, 0x12, 0x16));
-            notch.BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            notch.BorderBrush = UI.Ink(0x40);
             notch.BorderThickness = new Thickness(1);
             notch.Padding = new Thickness(10, 5, 12, 5);
             notch.HorizontalAlignment = HorizontalAlignment.Center;
@@ -7304,7 +7381,7 @@ namespace SlideDock
             dot.Width = Layout.V ? 14 : 1;
             dot.Height = Layout.V ? 1 : 14;
             dot.Margin = Layout.V ? new Thickness(0, 8, 0, 8) : new Thickness(10, 0, 10, 0);
-            dot.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            dot.Background = UI.Ink(0x40);
             notchSep = dot;
             notch.Cursor = Cursors.Hand;
             // klik bagian notch yang bukan ikon app = langsung buka dock penuh (tanpa menunggu jeda)
@@ -7674,7 +7751,7 @@ namespace SlideDock
             b.Width = Layout.V ? 28 : 1;
             b.Height = Layout.V ? 1 : 28;
             b.Margin = Layout.V ? new Thickness(0, 6, 0, 6) : new Thickness(6, 0, 6, 0);
-            b.Background = new SolidColorBrush(Color.FromArgb(0x40, 255, 255, 255));
+            b.Background = UI.Ink(0x40);
             return b;
         }
 
@@ -7957,7 +8034,7 @@ namespace SlideDock
                         Border line = new Border();
                         line.Height = 1;
                         line.Margin = new Thickness(10, 4, 10, 4);
-                        line.Background = new SolidColorBrush(Color.FromArgb(0x30, 255, 255, 255));
+                        line.Background = UI.Ink(0x30);
                         line.IsHitTestVisible = false;
                         cm.Items.Add(line);
                         continue;
@@ -7992,12 +8069,12 @@ namespace SlideDock
             if (Layout.V) { t.Height = double.NaN; t.Padding = new Thickness(2, 8, 2, 8); clockDate.FontSize = 9.5; }
             StackPanel clock = new StackPanel();
             clock.VerticalAlignment = VerticalAlignment.Center;
-            clockTime.Foreground = Brushes.White;
+            clockTime.Foreground = UI.Fg;
             clockTime.FontSize = 13.5;
             clockTime.FontWeight = FontWeights.SemiBold;
             clockTime.FontFamily = UI.Text;
             clockTime.TextAlignment = TextAlignment.Center;
-            clockDate.Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 255, 255, 255));
+            clockDate.Foreground = UI.Ink(0xB0);
             clockDate.FontSize = 10.5;
             clockDate.FontFamily = UI.Text;
             clockDate.TextAlignment = TextAlignment.Center;
@@ -8134,7 +8211,7 @@ namespace SlideDock
                 dot.Height = 3.5;
                 dot.Width = it.Active ? 16 : 5;
                 dot.CornerRadius = new CornerRadius(2);
-                dot.Background = new SolidColorBrush(it.Active ? Color.FromRgb(0x60, 0xCD, 0xFF) : Color.FromArgb(0xB0, 255, 255, 255));
+                dot.Background = it.Active ? (Brush)new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : UI.Ink(0xB0);
                 dot.VerticalAlignment = VerticalAlignment.Bottom;
                 dot.HorizontalAlignment = HorizontalAlignment.Center;
                 dot.Margin = new Thickness(0, 0, 0, 1);
@@ -8718,9 +8795,8 @@ namespace SlideDock
                 Application app = new Application();
                 app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
                 UI.ApplyMenuStyle(app);
+                UI.SetTheme(UI.SavedTheme());
                 Layout.Load();
-                TaskbarCtl.HideEnabled = Prefs.HideTaskbar;
-                WinKeyHook.Active = Prefs.WinKey;
 
                 StartWindow start = new StartWindow();
                 SearchWindow search = new SearchWindow();
@@ -8728,7 +8804,6 @@ namespace SlideDock
                 TrayPop trayPop = new TrayPop();
                 QuickPop quick = new QuickPop();
                 cal.OnNotifications = delegate { WinKeyHook.SendWinCombo(0x4E); };
-                trayPop.OnShowOriginal = delegate { TaskbarCtl.Peek(10); WinKeyHook.SendWinCombo(0x42); };  // Win+B
                 double sysScale;
                 using (DR.Graphics g = DR.Graphics.FromHwnd(IntPtr.Zero)) sysScale = g.DpiX / 96.0;
                 Func<WF.Screen, Rect> dipOf = delegate(WF.Screen sc)
@@ -8762,7 +8837,6 @@ namespace SlideDock
                 Action toggle = delegate { if (switchTo(start)) start.ShowPanel(cur.SurfaceTop); };
 
                 Action hideAll = delegate { foreach (Popover p in pops) p.HidePanel(); };
-                start.OnTrayFull = delegate { hideAll(); TaskbarCtl.Peek(10); WinKeyHook.SendWinCombo(0x42); };  // Win+B
                 wire = delegate(DockWindow d)
                 {
                     d.OnToggle = delegate { use(d); toggle(); };
@@ -8805,6 +8879,16 @@ namespace SlideDock
                     }
                     catch { }
                 });
+
+                // pertama kali dijalankan: langsung mulai bersama Windows (sekali saja, bila dimatikan tetap mati)
+                if (Prefs.Get("autostart-init", 0) == 0)
+                {
+                    Prefs.Set("autostart-init", 1);
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        if (!AutoStartOn()) { SetAutoStart(true); Log("first run: start with Windows turned on"); }
+                    });
+                }
 
                 // Desktop berubah -> panel & pin ikut berubah
                 List<FileSystemWatcher> watchers = new List<FileSystemWatcher>();
@@ -8849,26 +8933,10 @@ namespace SlideDock
                 menu.ForeColor = DR.Color.White;
                 menu.Font = new DR.Font("Segoe UI", 9.5f);
                 menu.Items.Add("Open Start", null, delegate { use(dock); toggle(); });
-                WF.ToolStripMenuItem hideTb = new WF.ToolStripMenuItem("Hide Windows taskbar");
-                hideTb.Checked = TaskbarCtl.HideEnabled;
-                Action<bool> setHideTb = delegate(bool on)
-                {
-                    hideTb.Checked = on;
-                    TaskbarCtl.HideEnabled = on;
-                    Prefs.HideTaskbar = on;
-                    if (on) TaskbarCtl.Apply(); else TaskbarCtl.ShowAll();
-                };
-                hideTb.Click += delegate { setHideTb(!hideTb.Checked); };
-                menu.Items.Add(hideTb);
-                WF.ToolStripMenuItem winKey = new WF.ToolStripMenuItem("Windows key opens dock");
-                winKey.Checked = WinKeyHook.Active;
-                Action<bool> setWinKey = delegate(bool on) { winKey.Checked = on; WinKeyHook.Active = on; Prefs.WinKey = on; };
-                winKey.Click += delegate { setWinKey(!winKey.Checked); };
-                menu.Items.Add(winKey);
-                WF.ToolStripMenuItem themeGlass = new WF.ToolStripMenuItem("Theme: Glass");
+                WF.ToolStripMenuItem themeGlass = new WF.ToolStripMenuItem("Theme: Glass 1");
+                WF.ToolStripMenuItem themeGlass2 = new WF.ToolStripMenuItem("Theme: Glass 2");
                 WF.ToolStripMenuItem themeDark = new WF.ToolStripMenuItem("Theme: Dark");
-                WF.ToolStripMenuItem themeAurora = new WF.ToolStripMenuItem("Theme: Aurora");
-                Action syncTheme = delegate { themeGlass.Checked = dock.Theme == "glass"; themeDark.Checked = dock.Theme == "dark"; themeAurora.Checked = dock.Theme == "aurora"; };
+                Action syncTheme = delegate { themeGlass.Checked = dock.Theme == "glass"; themeGlass2.Checked = dock.Theme == "glass2"; themeDark.Checked = dock.Theme == "dark"; };
                 Action<string> setTheme = delegate(string th)
                 {
                     foreach (DockWindow d in docks) d.ApplyTheme(th);
@@ -8876,11 +8944,11 @@ namespace SlideDock
                     foreach (Popover pp in pops) pp.RefreshSurface();
                 };
                 themeGlass.Click += delegate { setTheme("glass"); };
+                themeGlass2.Click += delegate { setTheme("glass2"); };
                 themeDark.Click += delegate { setTheme("dark"); };
-                themeAurora.Click += delegate { setTheme("aurora"); };
                 menu.Items.Add(themeGlass);
+                menu.Items.Add(themeGlass2);
                 menu.Items.Add(themeDark);
-                menu.Items.Add(themeAurora);
                 string[] posNames = new string[] { "Bottom", "Left", "Right" };
                 for (int pi = 0; pi < 3; pi++)
                 {
@@ -8951,9 +9019,9 @@ namespace SlideDock
                     l.Add(new KeyValuePair<string, Action>("Task Manager", delegate { Launcher.Open("taskmgr.exe"); }));
                     l.Add(new KeyValuePair<string, Action>("Windows Settings", delegate { Launcher.Open("ms-settings:"); }));
                     l.Add(new KeyValuePair<string, Action>(null, null));
-                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "glass") + "Theme: Glass", delegate { setTheme("glass"); }));
+                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "glass") + "Theme: Glass 1", delegate { setTheme("glass"); }));
+                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "glass2") + "Theme: Glass 2", delegate { setTheme("glass2"); }));
                     l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "dark") + "Theme: Dark", delegate { setTheme("dark"); }));
-                    l.Add(new KeyValuePair<string, Action>(ck(dock.Theme == "aurora") + "Theme: Aurora", delegate { setTheme("aurora"); }));
                     l.Add(new KeyValuePair<string, Action>(null, null));
                     string[] pn = new string[] { "Bottom", "Left", "Right" };
                     for (int i = 0; i < 3; i++)
@@ -8962,7 +9030,6 @@ namespace SlideDock
                         l.Add(new KeyValuePair<string, Action>(ck(Layout.Side == idx) + "Position: " + pn[i], delegate { if (Layout.Side == idx) return; changeSide(idx); }));
                     }
                     l.Add(new KeyValuePair<string, Action>(null, null));
-                    l.Add(new KeyValuePair<string, Action>(ck(WinKeyHook.Active) + "Windows key opens dock", delegate { setWinKey(!WinKeyHook.Active); }));
                     l.Add(new KeyValuePair<string, Action>(ck(AutoStartOn()) + "Start with Windows", delegate { SetAutoStart(!AutoStartOn()); auto.Checked = AutoStartOn(); }));
                     l.Add(new KeyValuePair<string, Action>("Open settings folder", delegate { Process.Start("explorer.exe", Store.Dir); }));
                     l.Add(new KeyValuePair<string, Action>(null, null));
@@ -8997,8 +9064,11 @@ namespace SlideDock
                     int code = u.Ver.Major * 1000000 + u.Ver.Minor * 1000 + u.Ver.Build;
                     if (Prefs.Get("notified", 0) == code) return;
                     Prefs.Set("notified", code);
-                    tray.ShowBalloonTip(10000, "SlideDock " + u.Ver.ToString(3) + " is available",
-                        "Click here to update now (you have " + AppInfo.Version + "). You can also update from Start.", WF.ToolTipIcon.Info);
+                    string tip = u.Notes.Count > 0
+                        ? string.Join("\n", u.Notes.Take(3).Select(x => "\u2022 " + (x.Length > 70 ? x.Substring(0, 67) + "..." : x)).ToArray()) + "\nClick to update."
+                        : "Click here to update now (you have " + AppInfo.Version + "). You can also update from Start.";
+                    if (tip.Length > 250) tip = tip.Substring(0, 247) + "...";
+                    tray.ShowBalloonTip(10000, "SlideDock " + u.Ver.ToString(3) + " is available", tip, WF.ToolTipIcon.Info);
                 };
                 if (Updater.Enabled)
                 {
@@ -9020,11 +9090,11 @@ namespace SlideDock
                 calTimer.Start();
 
                 // Dock settings di Start: tiap pilihan langsung berlaku
-                string[] themeKeys = new string[] { "glass", "dark", "aurora" };
+                string[] themeKeys = new string[] { "glass", "glass2", "dark" };
                 start.SettingsProvider = delegate
                 {
                     List<DockSetting> l = new List<DockSetting>();
-                    l.Add(new DockSetting { Section = "Appearance", Label = "Theme", Choices = new string[] { "Glass", "Dark", "Aurora" },
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Theme", Choices = new string[] { "Glass 1", "Glass 2", "Dark" },
                         Get = delegate { return Math.Max(0, Array.IndexOf(themeKeys, dock.Theme)); },
                         Set = delegate(int i) { setTheme(themeKeys[i]); } });
                     l.Add(new DockSetting { Section = "Appearance", Label = "Position", Choices = new string[] { "Bottom", "Left", "Right" },
@@ -9050,12 +9120,6 @@ namespace SlideDock
                     l.Add(new DockSetting { Section = "Behavior", Label = "Drag notch & dock along the edge", Toggle = true,
                         Get = delegate { return Prefs.DockMove ? 1 : 0; },
                         Set = delegate(int i) { Prefs.DockMove = i != 0; foreach (DockWindow d in docks) d.ApplySlide(true); } });
-                    l.Add(new DockSetting { Section = "Behavior", Label = "Windows key opens Start", Toggle = true,
-                        Get = delegate { return WinKeyHook.Active ? 1 : 0; },
-                        Set = delegate(int i) { setWinKey(i != 0); } });
-                    l.Add(new DockSetting { Section = "Behavior", Label = "Hide Windows taskbar", Toggle = true,
-                        Get = delegate { return TaskbarCtl.HideEnabled ? 1 : 0; },
-                        Set = delegate(int i) { setHideTb(i != 0); } });
                     l.Add(new DockSetting { Section = "Behavior", Label = "Start with Windows", Toggle = true,
                         Get = delegate { return AutoStartOn() ? 1 : 0; },
                         Set = delegate(int i) { SetAutoStart(i != 0); auto.Checked = AutoStartOn(); } });
@@ -9104,8 +9168,12 @@ namespace SlideDock
                     {
                         UpdateInfo av = Updater.Available;
                         if (av != null)
+                        {
                             l.Add(new DockSetting { Section = "Updates", Label = Updater.Busy ? "Downloading " + av.Ver.ToString(3) + "..." : "Install update " + av.Ver.ToString(3) + " (you have " + AppInfo.Version + ")",
                                 Click = delegate { installUpdate(); } });
+                            if (av.Notes.Count > 0)
+                                l.Add(new DockSetting { Section = "Updates", Label = "What's new in " + av.Ver.ToString(3) + ":\n" + string.Join("\n", av.Notes.Select(x => "\u2022  " + x).ToArray()) });
+                        }
                         l.Add(new DockSetting { Section = "Updates",
                             Label = Updater.Checking ? "Checking for updates..." :
                                     av == null && Updater.LastCheck > DateTime.MinValue && Updater.LastError == null ? "Version " + AppInfo.Version + "  ·  up to date. Check again" :
@@ -9194,7 +9262,7 @@ namespace SlideDock
                         closeAppPending = false;
                         sessionEnding = false;
                         TaskbarCtl.Releasing = false;
-                        TaskbarCtl.HideEnabled = Prefs.HideTaskbar;
+                        TaskbarCtl.HideEnabled = true;
                         TaskbarCtl.Apply();
                     }
                     return IntPtr.Zero;

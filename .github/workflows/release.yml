@@ -49,6 +49,15 @@ jobs:
             echo "Release v$v already exists. Bump VERSION to publish a new release."
             exit 0
           fi
+          # summary shown inside SlideDock: the "- " points of the release commit message
+          # (continuation lines indented by two spaces), followed by GitHub's generated notes
+          {
+            echo "## What's new"
+            echo
+            git log -1 --format=%b "$GITHUB_SHA" | grep -v -i '^co-authored-by:' | sed -n '/^- /,$p'
+            echo
+          } > notes.md
+          cat notes.md
           gh release create "v$v" \
             dist/SlideDock.exe dist/SlideDock.exe.sha256 "dist/SlideDock-$v-win-x64.zip" \
-            --target "$GITHUB_SHA" --title "SlideDock $v" --generate-notes
+            --target "$GITHUB_SHA" --title "SlideDock $v" --notes-file notes.md --generate-notes
