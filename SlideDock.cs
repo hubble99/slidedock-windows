@@ -513,6 +513,21 @@ namespace SlideDock
             Save(l);
         }
 
+        // urutan baru dari dock (ikon pin digeser): pin yang tidak disebut tetap ikut, di belakang
+        public static void Reorder(List<string> targets)
+        {
+            List<PinItem> l = Load();
+            List<PinItem> n = new List<PinItem>();
+            foreach (string t in targets)
+            {
+                PinItem p = l.FirstOrDefault(x => string.Equals(x.Target, t, StringComparison.OrdinalIgnoreCase));
+                if (p != null && !n.Contains(p)) n.Add(p);
+            }
+            foreach (PinItem p in l) if (!n.Contains(p)) n.Add(p);
+            if (n.SequenceEqual(l)) return;
+            Save(n);
+        }
+
         public static void Remove(string target)
         {
             Save(Load().Where(p => !string.Equals(p.Target, target, StringComparison.OrdinalIgnoreCase)).ToList());
@@ -7565,7 +7580,7 @@ namespace SlideDock
         void HoverPoll()
         {
             if (hiddenForFullscreen) return;
-            if (dragArmed || dragging) { lastNear = DateTime.Now; return; }
+            if (dragArmed || dragging || reOn || reSettling) { lastNear = DateTime.Now; return; }
             bool menu = MenuOpen();
             bool popup = AnyPopupOpen != null && AnyPopupOpen();
             if (preview.Showing && previewFromNotch && compact)     // pratinjau dari notch: notch tetap kecil
@@ -7736,7 +7751,7 @@ namespace SlideDock
                 if (Math.Abs(target - nv) < 0.002) nv = target; else moving = true;
                 st.ScaleX = nv;
                 st.ScaleY = nv;
-                Panel.SetZIndex(fe, (int)(nv * 100));
+                Panel.SetZIndex(fe, fe == reTile && (reOn || reSettling) ? 1000 : (int)(nv * 100));   // ikon yang diseret di atas
             }
             if (!moving)
             {
@@ -8228,7 +8243,16 @@ namespace SlideDock
             }
             t.Child = g;
             UI.Tip(t, it.Name);
+            t.RenderTransform = new TranslateTransform();      // dipakai saat ikon pin diurutkan ulang
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Activate(it); };
+            if (it.Pinned)
+            {
+                t.PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { ReorderPress(t, e); };
+                t.PreviewMouseMove += delegate(object s, MouseEventArgs e) { ReorderMove(t, e); };
+                t.PreviewMouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { if (ReorderRelease(t)) e.Handled = true; };
+                t.LostMouseCapture += delegate { if (reOn && reTile == t) ReorderRelease(t); };
+                t.ContextMenuOpening += delegate(object s, ContextMenuEventArgs e) { if (reOn || reSettling) e.Handled = true; };
+            }
 
             ContextMenu cm = new ContextMenu();
             if (it.Lnk != null)
@@ -8262,6 +8286,198 @@ namespace SlideDock
             }
             t.ContextMenu = cm;
             return t;
+        }
+
+        // ----- urutkan ikon pin: tekan lalu geser kiri-kanan (atas-bawah di dock samping) -----
+        // Ikon yang diseret mengikuti kursor, ikon pin lain bergeser memberi tempat. Semua gerakan dihitung
+        // tiap frame layar (CompositionTarget.Rendering, 60 fps) dari waktu yang berlalu, jadi tetap halus.
+        // Saat dilepas ikon meluncur ke tempatnya, lalu urutan disimpan ke pins.txt.
+        Border reTile;                       // ikon pin yang ditekan / diseret
+        FrameworkElement[] rePins;           // semua ikon pin saat mulai seret (urutan lama)
+        double[] reSlots;                    // posisi awal tiap ikon pin di sepanjang dock
+        bool rePressed, reOn, reSettling, reLoop;
+        Point reDown;
+        int reFrom, reTo;
+        double reGrab, reCursor;
+        readonly Stopwatch reWatch = new Stopwatch();
+        const double ReLift = 4;             // ikon yang diseret sedikit terangkat dari tepi layar
+
+        static double Along(Point p) { return Layout.V ? p.Y : p.X; }
+
+        void ReorderPress(Border t, MouseButtonEventArgs e)
+        {
+            if (reSettling) FinishReorder();
+            rePressed = e.ClickCount == 1 && !compact;
+            reTile = t;
+            reDown = e.GetPosition(itemsPanel);
+        }
+
+        void ReorderMove(Border t, MouseEventArgs e)
+        {
+            if (!rePressed || reTile != t) return;
+            if (e.LeftButton != MouseButtonState.Pressed) { if (reOn) ReorderRelease(t); rePressed = false; return; }
+            double a = Along(e.GetPosition(itemsPanel));
+            if (!reOn)
+            {
+                if (Math.Abs(a - Along(reDown)) < 6) return;      // ambang kecil: klik biasa tetap membuka app
+                if (!StartReorder(t)) { rePressed = false; return; }
+            }
+            reCursor = a;
+            UpdateReorderTarget();
+            StartReorderLoop();
+        }
+
+        bool StartReorder(Border t)
+        {
+            List<FrameworkElement> pins = new List<FrameworkElement>();
+            foreach (UIElement c in itemsPanel.Children)
+            {
+                FrameworkElement fe = c as FrameworkElement;
+                DockItem it = fe == null ? null : fe.DataContext as DockItem;
+                if (it != null && it.Pinned && fe.RenderTransform is TranslateTransform) pins.Add(fe);
+            }
+            int idx = pins.IndexOf(t);
+            if (idx < 0 || pins.Count < 2) return false;
+            rePins = pins.ToArray();
+            reSlots = new double[rePins.Length];
+            for (int i = 0; i < rePins.Length; i++)
+            {
+                Vector v = VisualTreeHelper.GetOffset(rePins[i]);           // posisi tata letak, tanpa geseran
+                reSlots[i] = Layout.V ? v.Y : v.X;
+            }
+            reFrom = reTo = idx;
+            reGrab = Along(reDown);
+            reOn = true;
+            t.CaptureMouse();
+            previewTimer.Stop();
+            preview.HidePreview();
+            CloseMenus();
+            foreach (FrameworkElement fe in rePins)
+            {
+                ToolTip tt = fe.ToolTip as ToolTip;
+                if (tt != null) tt.IsOpen = false;
+                ToolTipService.SetIsEnabled(fe, false);
+            }
+            Panel.SetZIndex(t, 1000);
+            return true;
+        }
+
+        // posisi ikon yang diseret (dibatasi di antara ikon pin pertama & terakhir) dan slot tujuannya
+        double ReorderOffset()
+        {
+            int n = reSlots.Length;
+            double lo = reSlots[0] - reSlots[reFrom], hi = reSlots[n - 1] - reSlots[reFrom];
+            return Math.Max(lo, Math.Min(hi, reCursor - reGrab));
+        }
+
+        void UpdateReorderTarget()
+        {
+            double c = reSlots[reFrom] + ReorderOffset();
+            int best = reFrom;
+            for (int i = 0; i < reSlots.Length; i++)
+                if (Math.Abs(reSlots[i] - c) < Math.Abs(reSlots[best] - c)) best = i;
+            reTo = best;
+        }
+
+        // geseran tujuan ikon pin ke-i di sepanjang dock
+        double ReorderShift(int i)
+        {
+            if (i == reFrom) return reOn ? ReorderOffset() : reSlots[reTo] - reSlots[reFrom];
+            if (reFrom < reTo && i > reFrom && i <= reTo) return reSlots[i - 1] - reSlots[i];
+            if (reTo < reFrom && i >= reTo && i < reFrom) return reSlots[i + 1] - reSlots[i];
+            return 0;
+        }
+
+        void StartReorderLoop()
+        {
+            if (reLoop) return;
+            reLoop = true;
+            reWatch.Restart();
+            CompositionTarget.Rendering += ReorderStep;
+        }
+
+        void ReorderStep(object sender, EventArgs e)
+        {
+            if (rePins == null) { CompositionTarget.Rendering -= ReorderStep; reLoop = false; return; }
+            double dt = Math.Min(50, reWatch.Elapsed.TotalMilliseconds);
+            reWatch.Restart();
+            double k = 1 - Math.Pow(1 - 0.3, dt / 16.7);          // sama cepat di 60 Hz maupun 144 Hz
+            double lift = Layout.Side == 1 ? ReLift : -ReLift;    // menjauh dari tepi layar
+            bool moving = reOn;
+            for (int i = 0; i < rePins.Length; i++)
+            {
+                TranslateTransform tt = rePins[i].RenderTransform as TranslateTransform;
+                if (tt == null) continue;
+                double target = ReorderShift(i);
+                double cur = Layout.V ? tt.Y : tt.X;
+                double nv;
+                if (i == reFrom && reOn) nv = target;              // ikon yang diseret menempel ke kursor
+                else
+                {
+                    nv = cur + (target - cur) * k;
+                    if (Math.Abs(target - nv) < 0.25) nv = target; else moving = true;
+                }
+                double up = 0;
+                if (i == reFrom)
+                {
+                    double upTarget = reOn ? lift : 0, upCur = Layout.V ? tt.X : tt.Y;
+                    up = upCur + (upTarget - upCur) * k;
+                    if (Math.Abs(upTarget - up) < 0.1) up = upTarget; else moving = true;
+                }
+                if (Layout.V) { tt.Y = nv; tt.X = up; } else { tt.X = nv; tt.Y = up; }
+            }
+            if (moving) return;
+            CompositionTarget.Rendering -= ReorderStep;
+            reLoop = false;
+            if (reSettling) FinishReorder();
+        }
+
+        bool ReorderRelease(Border t)
+        {
+            bool was = reOn;
+            rePressed = false;
+            if (!was) return false;
+            reOn = false;                                         // dulu: ReleaseMouseCapture memicu LostMouseCapture
+            reSettling = true;
+            if (t.IsMouseCaptured) t.ReleaseMouseCapture();
+            lastNear = DateTime.Now;
+            StartReorderLoop();                                   // ikon meluncur ke slotnya, lalu FinishReorder
+            return true;
+        }
+
+        // animasi selesai: ikon dipindah di panel (tanpa membangun ulang dock, jadi tidak berkedip) dan disimpan
+        void FinishReorder()
+        {
+            if (!reSettling) return;
+            reSettling = false;
+            if (reLoop) { CompositionTarget.Rendering -= ReorderStep; reLoop = false; }
+            FrameworkElement[] pins = rePins;
+            Border t = reTile;
+            rePins = null;
+            reTile = null;
+            if (pins == null) return;
+            foreach (FrameworkElement fe in pins)
+            {
+                TranslateTransform tt = fe.RenderTransform as TranslateTransform;
+                if (tt != null) { tt.X = 0; tt.Y = 0; }
+                ToolTipService.SetIsEnabled(fe, true);
+            }
+            if (t != null) Panel.SetZIndex(t, 100);
+            if (reTo == reFrom || t == null || !itemsPanel.Children.Contains(t)) return;
+            int from = itemsPanel.Children.IndexOf(t), to = itemsPanel.Children.IndexOf(pins[reTo]);
+            if (from < 0 || to < 0) return;
+            itemsPanel.Children.RemoveAt(from);
+            itemsPanel.Children.Insert(to, t);
+            List<DockItem> items = new List<DockItem>();
+            foreach (UIElement c in itemsPanel.Children)
+            {
+                FrameworkElement fe = c as FrameworkElement;
+                DockItem it = fe == null ? null : fe.DataContext as DockItem;
+                if (it != null) items.Add(it);
+            }
+            try { PinStore.Reorder(items.Where(i => i.Pinned).Select(i => i.Lnk).ToList()); } catch { }
+            signature = SigOf(items);                             // dock ini sudah sesuai; layar lain ikut di Tick
+            Magnify(itemsPanel.IsMouseOver ? Along(Mouse.GetPosition(itemsPanel)) : double.NaN);
         }
 
         void Activate(DockItem it)
@@ -8376,6 +8592,14 @@ namespace SlideDock
             return list;
         }
 
+        static string SigOf(List<DockItem> list)
+        {
+            StringBuilder sb = new StringBuilder();
+            foreach (DockItem it in list)
+                sb.Append(it.Lnk).Append('|').Append(it.Key).Append('|').Append(it.Wins.Count).Append('|').Append(it.Active ? 1 : 0).Append(';');
+            return sb.ToString();
+        }
+
         public void UpdateItems()
         {
             List<DockItem> list = BuildItems();
@@ -8387,10 +8611,8 @@ namespace SlideDock
                 string k = act.Key + "|" + act.Lnk;
                 if (k != activeKey) { activeKey = k; notchIcon.Source = IconOf(act); }
             }
-            StringBuilder sb = new StringBuilder();
-            foreach (DockItem it in list)
-                sb.Append(it.Lnk).Append('|').Append(it.Key).Append('|').Append(it.Wins.Count).Append('|').Append(it.Active ? 1 : 0).Append(';');
-            string sig = sb.ToString();
+            if (reOn || reSettling) return;              // ikon pin sedang diurutkan: dock jangan dibangun ulang
+            string sig = SigOf(list);
             if (sig == signature) return;
             signature = sig;
 

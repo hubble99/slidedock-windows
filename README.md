@@ -21,7 +21,7 @@ Updating downloads the new `SlideDock.exe`, checks its SHA-256 checksum, swaps t
 
 ## Features
 
-- **Dock** with pinned and running apps, live window previews (hover), magnify on hover
+- **Dock** with pinned and running apps, live window previews (hover), magnify on hover. Drag a pinned icon left or right (up or down on a side dock) to change the order
 - **Drag files into apps**: drag a file from Explorer onto an app icon (dock or notch), then hold it over a window preview; that window comes to the front so you can drop the file into it (e.g. WhatsApp Web, upload forms)
 - **Notch mode**: shrinks to a small pill when idle. When the mouse comes near, the notch stretches out a little like a loading bar and only opens the full dock if the mouse stays. Clicking an empty part of the notch opens the dock right away. App icons in the notch work like the dock: hover for window previews, click to switch
 - **Start**: your chosen apps (drag to reorder), clock, Wi‑Fi/battery/disk info, background (tray) apps, PC settings, Dock settings, Task Manager, power buttons (update-aware Restart/Shut down)
