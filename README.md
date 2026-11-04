@@ -4,9 +4,14 @@
 
 A modern dock that replaces the Windows 10/11 taskbar. Single C# file, built with the compiler that already ships with Windows. No installer, no Visual Studio.
 
+<p align="center">
+  <a href="https://github.com/hubble99/slidedock-windows/releases/latest/download/SlideDock.exe"><img alt="Download SlideDock.exe" src="https://img.shields.io/badge/Download-SlideDock.exe-0078D4?style=for-the-badge&logo=windows&logoColor=white" height="40"></a>
+  <a href="https://github.com/hubble99/slidedock-windows/releases/latest"><img alt="Latest version" src="https://img.shields.io/github/v/release/hubble99/slidedock-windows?style=for-the-badge&label=latest" height="40"></a>
+</p>
+
 ## Download
 
-Get `SlideDock.exe` from the [latest release](https://github.com/hubble99/slidedock-windows/releases/latest), put it in a folder you keep (for example `Documents\SlideDock`) and double-click it.
+Click **Download SlideDock.exe** above (or [download it here](https://github.com/hubble99/slidedock-windows/releases/latest/download/SlideDock.exe)): it always gets the newest version. You can also pick a file from the [latest release](https://github.com/hubble99/slidedock-windows/releases/latest). Put it in a folder you keep (for example `Documents\SlideDock`) and double-click it.
 
 The first time, Windows SmartScreen may say "Windows protected your PC" because the app isn't code-signed yet: click **More info → Run anyway**.
 
