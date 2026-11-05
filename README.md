@@ -32,7 +32,7 @@ Updating downloads the new `SlideDock.exe`, checks its SHA-256 checksum, swaps t
 - **Start**: your chosen apps (drag to reorder), clock, Wi‑Fi/battery/disk info, background (tray) apps, PC settings, Dock settings, Task Manager, power buttons (update-aware Restart/Shut down)
 - **Search** for apps, files and the web
 - **Status icons**: Wi‑Fi, volume and a battery ring (blue bolt while charging); each icon opens its own panel (Wi‑Fi list, volume, battery), scroll on the volume icon to change volume
-- **Quick Settings**: brightness, volume, Wi‑Fi list and connect
+- **Quick Settings**: brightness, volume, Wi‑Fi list and connect, Bluetooth on/off with paired and nearby devices (pair, connect or disconnect headphones and speakers, remove)
 - **Calendar + notifications** (dismiss one or clear all). Click a date to see that day: public holidays for your country (taken from Windows *Country or region*, shown as red dates, names in the local language or English), observances, and your Google Calendar events. **Open in Google Calendar** and **+ Event** open that day in your browser
 - **Google Calendar (read-only)**: paste your calendar's *Secret address in iCal format* in Dock settings → Calendar. Events show as blue dots and in the day panel; the link is stored encrypted for your Windows account. Works with any iCal link (Outlook, iCloud)
 - **Themes**: Glass 1 (dark frosted glass, white text), Glass 2 (bright white frosted glass, black text) or Dark

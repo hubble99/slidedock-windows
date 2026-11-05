@@ -1714,19 +1714,85 @@ namespace SlideDock
         // dock kiri/kanan: titik tengah tegak yang diinginkan (mis. ikon/jam yang diklik); NaN = tengah dock
         protected double SideAnchor = double.NaN;
 
-        // dock di bawah: posisi kiri popup agar tengahnya sejajar dengan cx (NaN = tengah dock), tetap di layar
+        // dock di bawah: posisi kiri popup agar tengahnya sejajar dengan cx (NaN = tengah dock).
+        // Batas layar diterapkan kemudian (ClampX), karena tergantung margin bayangan tiap popup.
         protected static double AlongX(double w, double cx)
         {
             if (double.IsNaN(cx)) cx = DockSpan.IsEmpty ? Scr.Left + Scr.Width / 2 : DockSpan.Left + DockSpan.Width / 2;
-            return Math.Max(Scr.Left + 8, Math.Min(Scr.Right - 8 - w, cx - w / 2));
+            return cx - w / 2;
         }
 
-        Point SidePoint(Size s)
+        // aturan posisi yang sama untuk semua popup & semua posisi dock (dihitung dari tepi KARTU, bukan jendela)
+        const double Gap = 8;               // jarak kartu ke dock
+        const double Pad = 8;               // jarak minimum kartu ke tepi layar
+
+        // jendela popup lebih besar dari kartunya (ruang bayangan): margin kartu di satu sisi
+        // side: 0 = bawah, 1 = kiri, 2 = kanan, 3 = atas
+        double Inset(int side)
+        {
+            List<Border> cards = Cards;
+            if (cards == null)
+            {
+                Border c0 = Content as Border;
+                if (c0 == null) return 0;
+                cards = new List<Border> { c0 };
+            }
+            double m = 0;
+            foreach (Border c in cards)
+            {
+                Thickness t = c.Margin;
+                m = Math.Max(m, side == 0 ? t.Bottom : side == 1 ? t.Left : side == 2 ? t.Right : t.Top);
+            }
+            return m;
+        }
+
+        double ClampX(double x, double w)
+        {
+            double lo = Scr.Left + Pad - Inset(1), hi = Scr.Right - Pad + Inset(2) - w;
+            return hi < lo ? lo : Math.Max(lo, Math.Min(hi, x));
+        }
+
+        double ClampY(double y, double h)
+        {
+            double lo = Scr.Top + Pad - Inset(3), hi = Scr.Bottom - Pad + Inset(0) - h;
+            return hi < lo ? lo : Math.Max(lo, Math.Min(hi, y));
+        }
+
+        // dock kiri/kanan: tegak di tengah SideAnchor, lalu dijaga sejajar dock (tepi kartu tidak melewati
+        // ujung atas/bawah dock selama muat), lalu dijaga di dalam layar.
+        // resize = ukuran berubah saat terbuka: tepi yang dekat ujung dock tetap, popup tumbuh ke arah lain.
+        Point sideTarget;
+        double sideH;
+
+        Point SidePlace(Size s, bool resize)
         {
             double c = !double.IsNaN(SideAnchor) ? SideAnchor : DockSpan.IsEmpty ? Scr.Top + Scr.Height / 2 : DockSpan.Top + DockSpan.Height / 2;
-            double y = Math.Max(Scr.Top + 8, Math.Min(Scr.Bottom - 8 - s.Height, c - s.Height / 2));
-            double x = Layout.Side == 1 ? Scr.Left + SideGap : Scr.Right - SideGap - s.Width;
-            return new Point(x, y);
+            double y = c - s.Height / 2;
+            if (resize && sideH > 0)
+            {
+                double mid = DockSpan.IsEmpty ? Scr.Top + Scr.Height / 2 : DockSpan.Top + DockSpan.Height / 2;
+                y = c >= mid ? sideTarget.Y + sideH - s.Height : sideTarget.Y;
+            }
+            double x;
+            if (!DockSpan.IsEmpty)
+            {
+                double a = DockSpan.Top - Inset(3);                 // tepi atas kartu = ujung atas dock
+                double b = DockSpan.Bottom + Inset(0) - s.Height;   // tepi bawah kartu = ujung bawah dock
+                y = Math.Max(Math.Min(a, b), Math.Min(Math.Max(a, b), y));
+                x = Layout.Side == 1 ? DockSpan.Right + Gap - Inset(1) : DockSpan.Left - Gap + Inset(2) - s.Width;
+            }
+            else x = Layout.Side == 1 ? Scr.Left + SideGap : Scr.Right - SideGap - s.Width;
+            Point p = new Point(x, ClampY(y, s.Height));
+            sideTarget = p;
+            sideH = s.Height;
+            return p;
+        }
+
+        // dock di bawah: kartu berdiri Gap di atas dock
+        double BottomY(double h, double fallbackTop)
+        {
+            double top = DockSpan.IsEmpty ? fallbackTop : DockSpan.Top;
+            return top - Gap + Inset(0) - h;
         }
         protected List<Border> Cards;
         public static Rect Scr = new Rect(0, 0, SystemParameters.PrimaryScreenWidth, SystemParameters.PrimaryScreenHeight);
@@ -1763,7 +1829,7 @@ namespace SlideDock
                 {
                     // ukuran berubah sebelum animasi buka dimulai (mis. isi baru dimuat saat dibuka ulang):
                     // perbarui tujuan animasi, jangan meluncur ke posisi lama yang dihitung dari ukuran lama
-                    Point np = Layout.V ? SidePoint(new Size(ActualWidth, ActualHeight)) : AnchoredPoint(slideTarget.X);
+                    Point np = Layout.V ? SidePlace(new Size(ActualWidth, ActualHeight), true) : AnchoredPoint(slideTarget.X);
                     slideTarget = np;
                     Left = np.X;
                     Top = np.Y;
@@ -1777,7 +1843,7 @@ namespace SlideDock
                 ++glideGen;                   // ukuran berubah di tengah animasi: langsung ke posisi akhir
                 if (Layout.V)
                 {
-                    Point sp2 = SidePoint(new Size(ActualWidth, ActualHeight));
+                    Point sp2 = SidePlace(new Size(ActualWidth, ActualHeight), true);
                     Left = sp2.X;
                     Top = sp2.Y;
                     curPos = sp2;
@@ -1789,11 +1855,33 @@ namespace SlideDock
             };
         }
 
+        double heldLeft = double.NaN;      // HoldEdge(true): tepi kiri ditahan di sini
+
         Point AnchoredPoint(double left)
         {
-            if (anchorRight > 0) left = Math.Max(0, anchorRight - ActualWidth);
-            if (anchorCenter > 0) left = Math.Max(Scr.Left + 8, Math.Min(anchorCenter - ActualWidth / 2, Scr.Right - 8 - ActualWidth));
-            return new Point(left, anchorBottom - ActualHeight);
+            double w = ActualWidth;
+            if (!double.IsNaN(heldLeft)) left = heldLeft;
+            if (anchorRight > 0) left = anchorRight - w;
+            if (anchorCenter > 0) left = anchorCenter - w / 2;
+            return new Point(ClampX(left, w), anchorBottom - ActualHeight);
+        }
+
+        // posisi kiri akhir popup (bukan posisi sesaat selama animasi)
+        protected double FinalLeft { get { return Layout.V ? sideTarget.X : AnchoredPoint(Left).X; } }
+
+        // isi akan melebar/menyempit di satu sisi (mis. panel Wi-Fi di Quick Settings): sisi lain ditahan
+        // supaya isi yang sudah ada tidak bergeser dari bawah kursor.
+        // Dock kiri/kanan tidak perlu: sisi yang menghadap dock memang selalu tetap.
+        protected void HoldEdge(bool keepLeft)
+        {
+            if (Layout.V || !IsOpen) return;
+            double left = AnchoredPoint(Left).X;
+            double w = ActualWidth;
+            anchorCenter = -1;
+            anchorRight = -1;
+            heldLeft = double.NaN;
+            if (keepLeft) heldLeft = left;
+            else anchorRight = left + w;
         }
 
         bool slidePending;                 // popup tampil, animasi buka belum mulai
@@ -1801,10 +1889,10 @@ namespace SlideDock
 
         void PlaceAnchored()
         {
-            Top = anchorBottom - ActualHeight;
-            if (anchorRight > 0) Left = Math.Max(0, anchorRight - ActualWidth);
-            if (anchorCenter > 0) Left = Math.Max(Scr.Left + 8, Math.Min(anchorCenter - ActualWidth / 2, Scr.Right - 8 - ActualWidth));
-            curPos = new Point(Left, Top);
+            Point ap = AnchoredPoint(Left);
+            Left = ap.X;
+            Top = ap.Y;
+            curPos = ap;
             if (slidePending) slideTarget = curPos;
             UpdateLayout();
             ApplySurface(false);
@@ -1817,9 +1905,10 @@ namespace SlideDock
             BeginAnimation(Window.TopProperty, null);
             ++glideGen;
             SideAnchor = center.Y;
+            heldLeft = double.NaN;
             if (Layout.V)
             {
-                Point sp = SidePoint(new Size(ActualWidth, ActualHeight));
+                Point sp = SidePlace(new Size(ActualWidth, ActualHeight), false);
                 Left = sp.X;
                 Top = sp.Y;
                 curPos = sp;
@@ -1828,7 +1917,8 @@ namespace SlideDock
                 ApplySurface(false);
                 return;
             }
-            if (anchorCenter < 0) return;
+            if (!AnchorCenter) return;
+            anchorRight = -1;
             anchorCenter = center.X;
             PlaceAnchored();
         }
@@ -2002,8 +2092,12 @@ namespace SlideDock
             Opacity = 0;
             Show();
             UpdateLayout();
-            Point p = place(new Size(ActualWidth, ActualHeight));
-            if (Layout.V) p = SidePoint(new Size(ActualWidth, ActualHeight));
+            Size sz = new Size(ActualWidth, ActualHeight);
+            Point p = place(sz);
+            heldLeft = double.NaN;
+            // place() memakai dockTop - tinggi + 6 (cadangan bila posisi dock belum diketahui)
+            if (Layout.V) p = SidePlace(sz, false);
+            else p = new Point(ClampX(p.X, sz.Width), BottomY(sz.Height, p.Y + sz.Height - 6));
             Left = p.X;
             double target = p.Y;
             Top = target;
@@ -4640,6 +4734,846 @@ namespace SlideDock
         }
     }
 
+    // ----- Bluetooth: radio, daftar perangkat, connect/disconnect audio -----
+    [ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceEnumeratorFull
+    {
+        [PreserveSig] int EnumAudioEndpoints(int flow, int mask, out IMMDeviceCollection devices);
+        [PreserveSig] int GetDefaultAudioEndpoint(int flow, int role, out IMMDeviceFull dev);
+        [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDeviceFull dev);
+    }
+
+    [ComImport, Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceCollection
+    {
+        [PreserveSig] int GetCount(out uint n);
+        [PreserveSig] int Item(uint i, out IMMDeviceFull dev);
+    }
+
+    [ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IMMDeviceFull
+    {
+        [PreserveSig] int Activate(ref Guid iid, int ctx, IntPtr p, [MarshalAs(UnmanagedType.IUnknown)] out object o);
+        [PreserveSig] int OpenPropertyStore(int access, out IPropertyStore store);
+        [PreserveSig] int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetState(out int state);
+    }
+
+    [ComImport, Guid("2A07407E-6497-4A18-9787-32F79BD0D98F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IDeviceTopology
+    {
+        [PreserveSig] int GetConnectorCount(out uint n);
+        [PreserveSig] int GetConnector(uint i, out IConnector c);
+    }
+
+    [ComImport, Guid("9C2C4058-23F5-41DE-877A-DF3AF236A09E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IConnector
+    {
+        [PreserveSig] int GetConnType(out int t);
+        [PreserveSig] int GetDataFlow(out int f);
+        [PreserveSig] int ConnectTo(IntPtr other);
+        [PreserveSig] int Disconnect();
+        [PreserveSig] int IsConnected([MarshalAs(UnmanagedType.Bool)] out bool c);
+        [PreserveSig] int GetConnectedTo(out IntPtr other);
+        [PreserveSig] int GetConnectorIdConnectedTo([MarshalAs(UnmanagedType.LPWStr)] out string id);
+        [PreserveSig] int GetDeviceIdConnectedTo([MarshalAs(UnmanagedType.LPWStr)] out string id);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct KSPROPERTY { public Guid Set; public uint Id; public uint Flags; }
+
+    [ComImport, Guid("28F54685-06FD-11D2-B27A-00A0C9223196"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IKsControl
+    {
+        [PreserveSig] int KsProperty(ref KSPROPERTY p, uint len, IntPtr data, uint dataLen, out uint ret);
+    }
+
+    class BtDev
+    {
+        public string Key;                  // nama (perangkat dual-mode muncul 2x: klasik + LE)
+        public string Name;
+        public string Address;              // AABBCCDDEEFF
+        public bool Paired, Connected;
+        public int Major = -1;              // kelas perangkat klasik (4 = audio, 5 = keyboard/mouse, 2 = ponsel)
+        public int Signal = int.MinValue;
+        public global::Windows.Devices.Enumeration.DeviceInformation Info;
+    }
+
+    class BtAudio { public string FilterId; public string Name; public string Friendly; }
+
+    static class Bt
+    {
+        public static readonly string[] Props = {
+            "System.Devices.Aep.IsPaired", "System.Devices.Aep.IsConnected", "System.Devices.Aep.DeviceAddress",
+            "System.Devices.Aep.SignalStrength", "System.Devices.Aep.Bluetooth.Cod.Major",
+            "System.Devices.Aep.Bluetooth.Le.IsConnectable" };
+        // pilihan resmi Windows: yang sudah dipasangkan langsung muncul (tanpa memindai),
+        // perangkat baru di sekitar menyusul selama pemindaian berjalan
+        public static string[] Selectors()
+        {
+            try
+            {
+                return new string[] {
+                    global::Windows.Devices.Bluetooth.BluetoothDevice.GetDeviceSelectorFromPairingState(true),
+                    global::Windows.Devices.Bluetooth.BluetoothLEDevice.GetDeviceSelectorFromPairingState(true),
+                    global::Windows.Devices.Bluetooth.BluetoothDevice.GetDeviceSelectorFromPairingState(false),
+                    global::Windows.Devices.Bluetooth.BluetoothLEDevice.GetDeviceSelectorFromPairingState(false) };
+            }
+            catch { return new string[0]; }
+        }
+
+        public static T Wait<T>(global::Windows.Foundation.IAsyncOperation<T> op, int ms)
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            while (op.Status == global::Windows.Foundation.AsyncStatus.Started)
+            {
+                if (sw.ElapsedMilliseconds > ms) { op.Cancel(); throw new TimeoutException(); }
+                Thread.Sleep(15);
+            }
+            if (op.Status != global::Windows.Foundation.AsyncStatus.Completed) throw new InvalidOperationException("WinRT call " + op.Status);
+            return op.GetResults();
+        }
+
+        static global::Windows.Devices.Radios.Radio Radio()
+        {
+            try
+            {
+                foreach (var r in Wait(global::Windows.Devices.Radios.Radio.GetRadiosAsync(), 5000))
+                    if (r.Kind == global::Windows.Devices.Radios.RadioKind.Bluetooth) return r;
+            }
+            catch { }
+            return null;
+        }
+
+        // null = tidak ada adaptor Bluetooth
+        public static bool? IsOn()
+        {
+            var r = Radio();
+            if (r == null) return null;
+            return r.State == global::Windows.Devices.Radios.RadioState.On;
+        }
+
+        // null = berhasil, selain itu pesan galat
+        public static string SetOn(bool on)
+        {
+            try
+            {
+                var r = Radio();
+                if (r == null) return "No Bluetooth adapter found";
+                Wait(global::Windows.Devices.Radios.Radio.RequestAccessAsync(), 5000);
+                var st = Wait(r.SetStateAsync(on ? global::Windows.Devices.Radios.RadioState.On : global::Windows.Devices.Radios.RadioState.Off), 8000);
+                if (st != global::Windows.Devices.Radios.RadioAccessStatus.Allowed) return "Windows did not allow turning Bluetooth " + (on ? "on" : "off");
+                return null;
+            }
+            catch (Exception e) { return "Could not turn Bluetooth " + (on ? "on" : "off") + " (" + e.Message + ")"; }
+        }
+
+        public static object Prop(global::Windows.Devices.Enumeration.DeviceInformation d, string key)
+        {
+            object v;
+            try { if (d.Properties.TryGetValue(key, out v)) return v; } catch { }
+            return null;
+        }
+
+        public static string Pair(global::Windows.Devices.Enumeration.DeviceInformation d, Action<string> pin)
+        {
+            try
+            {
+                var custom = d.Pairing.Custom;
+                var handler = new global::Windows.Foundation.TypedEventHandler<
+                    global::Windows.Devices.Enumeration.DeviceInformationCustomPairing,
+                    global::Windows.Devices.Enumeration.DevicePairingRequestedEventArgs>(delegate(
+                        global::Windows.Devices.Enumeration.DeviceInformationCustomPairing s,
+                        global::Windows.Devices.Enumeration.DevicePairingRequestedEventArgs a)
+                    {
+                        if (!string.IsNullOrEmpty(a.Pin) && pin != null) pin(a.Pin);
+                        a.Accept();
+                    });
+                custom.PairingRequested += handler;
+                try
+                {
+                    var kinds = global::Windows.Devices.Enumeration.DevicePairingKinds.ConfirmOnly
+                              | global::Windows.Devices.Enumeration.DevicePairingKinds.DisplayPin
+                              | global::Windows.Devices.Enumeration.DevicePairingKinds.ConfirmPinMatch;
+                    var res = Wait(custom.PairAsync(kinds), 45000);
+                    if (res.Status == global::Windows.Devices.Enumeration.DevicePairingResultStatus.Paired
+                        || res.Status == global::Windows.Devices.Enumeration.DevicePairingResultStatus.AlreadyPaired) return null;
+                    return "Could not pair with " + d.Name + " (" + res.Status + "). Try Bluetooth settings.";
+                }
+                finally { custom.PairingRequested -= handler; }
+            }
+            catch (TimeoutException) { return "Pairing with " + d.Name + " timed out"; }
+            catch (Exception e) { return "Could not pair with " + d.Name + " (" + e.Message + ")"; }
+        }
+
+        public static string Unpair(global::Windows.Devices.Enumeration.DeviceInformation d)
+        {
+            try
+            {
+                var res = Wait(d.Pairing.UnpairAsync(), 15000);
+                if (res.Status == global::Windows.Devices.Enumeration.DeviceUnpairingResultStatus.Unpaired
+                    || res.Status == global::Windows.Devices.Enumeration.DeviceUnpairingResultStatus.AlreadyUnpaired) return null;
+                return "Could not remove " + d.Name + " (" + res.Status + ")";
+            }
+            catch (Exception e) { return "Could not remove " + d.Name + " (" + e.Message + ")"; }
+        }
+
+        // ----- audio: Windows tidak punya API publik untuk connect perangkat Bluetooth.
+        // Pengaturan Suara memakai properti KS "oneshot reconnect/disconnect" pada filter audio Bluetooth;
+        // cara yang sama dipakai di sini.
+        static readonly Guid KsBtAudio = new Guid("7FA06C40-B8F6-4C7E-8556-E8C33A12E54D");
+        static readonly PROPERTYKEY PkFriendly = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
+        static readonly PROPERTYKEY PkIface = new PROPERTYKEY { fmtid = new Guid("026e516e-b814-414b-83cd-856d6fef4822"), pid = 2 };
+
+        [DllImport("ole32.dll")] static extern int PropVariantClear(ref PROPVARIANT v);
+
+        static string ReadStr(IPropertyStore ps, PROPERTYKEY k)
+        {
+            PROPVARIANT v;
+            if (ps.GetValue(ref k, out v) != 0) return null;
+            try { return v.vt == 31 && v.p != IntPtr.Zero ? Marshal.PtrToStringUni(v.p) : null; }
+            finally { PropVariantClear(ref v); }
+        }
+
+        // filter audio Bluetooth (juga yang sedang terputus)
+        public static List<BtAudio> AudioFilters()
+        {
+            List<BtAudio> res = new List<BtAudio>();
+            try
+            {
+                IMMDeviceEnumeratorFull en = (IMMDeviceEnumeratorFull)new MMDeviceEnumeratorCom();
+                IMMDeviceCollection col;
+                if (en.EnumAudioEndpoints(2, 0xF, out col) != 0 || col == null) return res;
+                uint n;
+                col.GetCount(out n);
+                Guid iidTopo = typeof(IDeviceTopology).GUID;
+                for (uint i = 0; i < n; i++)
+                {
+                    try
+                    {
+                        IMMDeviceFull dev;
+                        if (col.Item(i, out dev) != 0 || dev == null) continue;
+                        object o;
+                        if (dev.Activate(ref iidTopo, 23, IntPtr.Zero, out o) != 0 || o == null) continue;
+                        IDeviceTopology topo = (IDeviceTopology)o;
+                        uint cc;
+                        if (topo.GetConnectorCount(out cc) != 0 || cc == 0) continue;
+                        IConnector c;
+                        if (topo.GetConnector(0, out c) != 0 || c == null) continue;
+                        string fid;
+                        if (c.GetDeviceIdConnectedTo(out fid) != 0 || fid == null) continue;
+                        if (fid.IndexOf("bth", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        if (res.Any(x => x.FilterId == fid)) continue;
+                        BtAudio a = new BtAudio { FilterId = fid };
+                        IPropertyStore ps;
+                        if (dev.OpenPropertyStore(0, out ps) == 0 && ps != null)
+                        {
+                            a.Name = ReadStr(ps, PkIface);
+                            a.Friendly = ReadStr(ps, PkFriendly);
+                        }
+                        res.Add(a);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return res;
+        }
+
+        public static List<BtAudio> Match(List<BtAudio> filters, BtDev d)
+        {
+            List<BtAudio> res = new List<BtAudio>();
+            if (filters == null) return res;
+            foreach (BtAudio a in filters)
+            {
+                bool m = (d.Address != null && a.FilterId.ToUpperInvariant().Contains(d.Address))
+                      || (a.Name != null && (string.Equals(a.Name, d.Name, StringComparison.OrdinalIgnoreCase)
+                                             || a.Name.StartsWith(d.Name + " ", StringComparison.OrdinalIgnoreCase)))
+                      || (a.Friendly != null && a.Friendly.IndexOf("(" + d.Name + ")", StringComparison.OrdinalIgnoreCase) >= 0);
+                if (m) res.Add(a);
+            }
+            return res;
+        }
+
+        public static bool AudioConnect(List<BtAudio> filters, bool connect)
+        {
+            bool ok = false;
+            try
+            {
+                IMMDeviceEnumeratorFull en = (IMMDeviceEnumeratorFull)new MMDeviceEnumeratorCom();
+                Guid iidKs = typeof(IKsControl).GUID;
+                // A2DP dulu: menyambungkan/memutus itu biasanya ikut membawa profil lain (hands-free)
+                foreach (BtAudio a in filters.OrderBy(x => x.FilterId.IndexOf("110b", StringComparison.OrdinalIgnoreCase) >= 0 ? 0 : 1))
+                {
+                    try
+                    {
+                        IMMDeviceFull dev;
+                        if (en.GetDevice(a.FilterId, out dev) != 0 || dev == null) continue;
+                        object o;
+                        if (dev.Activate(ref iidKs, 23, IntPtr.Zero, out o) != 0 || o == null) continue;
+                        KSPROPERTY p = new KSPROPERTY { Set = KsBtAudio, Id = connect ? 0u : 1u, Flags = 1 };
+                        uint ret;
+                        if (((IKsControl)o).KsProperty(ref p, (uint)Marshal.SizeOf(typeof(KSPROPERTY)), IntPtr.Zero, 0, out ret) == 0) ok = true;
+                    }
+                    catch { }
+                    if (ok && connect) break;
+                }
+            }
+            catch { }
+            return ok;
+        }
+    }
+
+    class BtPanel : StackPanel
+    {
+        readonly StackPanel list = new StackPanel();
+        readonly TextBlock status = new TextBlock();
+        readonly Border switchHost = new Border();
+        readonly Dictionary<string, global::Windows.Devices.Enumeration.DeviceInformation> devs =
+            new Dictionary<string, global::Windows.Devices.Enumeration.DeviceInformation>();
+        readonly List<global::Windows.Devices.Enumeration.DeviceWatcher> watchers =
+            new List<global::Windows.Devices.Enumeration.DeviceWatcher>();
+        readonly DispatcherTimer renderTimer = new DispatcherTimer();
+        readonly DispatcherTimer quietTimer = new DispatcherTimer();
+        bool quiet;                         // sudah lama memindai tapi belum ada perangkat baru
+        List<BtAudio> audio;
+        bool? radioOn;
+        bool radioBusy;
+        int gen;
+        string expanded;
+        string busyKey;
+        string message;
+        string lastSig;
+        public Action OnClose;
+        public Action<string> OnState;      // teks kecil di ubin Bluetooth Quick Settings
+
+        public BtPanel()
+        {
+            Width = 300;
+            Grid head = new Grid();
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock title = new TextBlock();
+            title.Text = "Bluetooth";
+            title.Foreground = UI.Fg;
+            title.FontSize = 15;
+            title.FontWeight = FontWeights.SemiBold;
+            title.FontFamily = UI.Text;
+            title.Margin = new Thickness(4, 0, 0, 0);
+            title.VerticalAlignment = VerticalAlignment.Center;
+            head.Children.Add(title);
+            switchHost.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(switchHost, 1);
+            head.Children.Add(switchHost);
+            Border refresh = IconButton("", "Refresh");
+            refresh.MouseLeftButtonUp += delegate { Start(); };
+            Grid.SetColumn(refresh, 2);
+            head.Children.Add(refresh);
+            Children.Add(head);
+
+            status.Foreground = UI.Ink(0xB0);
+            status.FontSize = 12;
+            status.FontFamily = UI.Text;
+            status.TextWrapping = TextWrapping.Wrap;
+            status.Margin = new Thickness(4, 2, 4, 8);
+
+            // tinggi sama dengan panel Wi-Fi supaya popup tidak melompat
+            Grid body = new Grid();
+            body.Height = 340;
+            body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            body.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+            body.Children.Add(status);
+            ScrollViewer sv = new ScrollViewer();
+            sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            sv.Content = list;
+            Grid.SetRow(sv, 1);
+            body.Children.Add(sv);
+            Children.Add(body);
+
+            Border settings = new Border();
+            settings.CornerRadius = new CornerRadius(10);
+            settings.Padding = new Thickness(8, 7, 8, 7);
+            settings.Margin = new Thickness(0, 8, 0, 0);
+            settings.Background = Brushes.Transparent;
+            settings.Cursor = Cursors.Hand;
+            UI.Hover(settings, 0x30);
+            StackPanel sr = new StackPanel();
+            sr.Orientation = Orientation.Horizontal;
+            sr.Children.Add(UI.Glyph("", 13));
+            TextBlock st = new TextBlock();
+            st.Text = "Bluetooth settings";
+            st.Foreground = UI.Fg;
+            st.FontSize = 12.5;
+            st.FontFamily = UI.Text;
+            st.Margin = new Thickness(10, 0, 0, 0);
+            sr.Children.Add(st);
+            settings.Child = sr;
+            settings.MouseLeftButtonUp += delegate { if (OnClose != null) OnClose(); Launcher.Open("ms-settings:bluetooth"); };
+            Children.Add(settings);
+
+            renderTimer.Interval = TimeSpan.FromMilliseconds(400);
+            renderTimer.Tick += delegate { renderTimer.Stop(); Render(); };
+            quietTimer.Interval = TimeSpan.FromSeconds(15);
+            quietTimer.Tick += delegate { quietTimer.Stop(); quiet = true; lastSig = null; Render(); };
+            IsVisibleChanged += delegate { if (!IsVisible) Stop(); };
+        }
+
+        static Border IconButton(string glyph, string tip)
+        {
+            Border b = new Border();
+            b.Width = 30;
+            b.Height = 28;
+            b.CornerRadius = new CornerRadius(8);
+            b.Background = Brushes.Transparent;
+            b.Cursor = Cursors.Hand;
+            b.ToolTip = tip;
+            UI.Hover(b, 0x30);
+            b.Child = UI.Glyph(glyph, 13);
+            return b;
+        }
+
+        FrameworkElement Switch(bool on)
+        {
+            Border b = new Border();
+            b.Width = 40;
+            b.Height = 20;
+            b.Margin = new Thickness(0, 0, 6, 0);
+            b.CornerRadius = new CornerRadius(10);
+            b.Cursor = radioBusy ? Cursors.Wait : Cursors.Hand;
+            b.ToolTip = on ? "Turn Bluetooth off" : "Turn Bluetooth on";
+            b.Opacity = radioBusy ? 0.5 : 1;
+            b.Background = on ? new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : UI.Ink(0x40);
+            Border knob = new Border();
+            knob.Width = 14;
+            knob.Height = 14;
+            knob.CornerRadius = new CornerRadius(7);
+            knob.Background = on ? Brushes.Black : UI.Fg;
+            knob.Margin = new Thickness(3);
+            knob.HorizontalAlignment = on ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+            b.Child = knob;
+            b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; SetRadio(!on); };
+            return b;
+        }
+
+        void SetRadio(bool on)
+        {
+            if (radioBusy) return;
+            radioBusy = true;
+            message = on ? "Turning Bluetooth on..." : "Turning Bluetooth off...";
+            Render();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string err = Bt.SetOn(on);
+                Thread.Sleep(600);
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    radioBusy = false;
+                    message = err;
+                    Start();
+                }));
+            });
+        }
+
+        public void Start()
+        {
+            Stop();
+            int g = ++gen;
+            expanded = null;
+            lastSig = null;
+            if (!radioBusy && message == null) status.Text = "Looking for devices...";
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool? on = Bt.IsOn();
+                List<BtAudio> au = on == true ? Bt.AudioFilters() : null;
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (g != gen) return;
+                    radioOn = on;
+                    audio = au;
+                    lastSig = null;
+                    Render();
+                    if (on == true && IsVisible) { StartWatchers(g); quietTimer.Start(); }
+                }));
+            });
+        }
+
+        public void Stop()
+        {
+            gen++;
+            renderTimer.Stop();
+            quietTimer.Stop();
+            quiet = false;
+            foreach (var w in watchers)
+            {
+                try
+                {
+                    if (w.Status == global::Windows.Devices.Enumeration.DeviceWatcherStatus.Started
+                        || w.Status == global::Windows.Devices.Enumeration.DeviceWatcherStatus.EnumerationCompleted) w.Stop();
+                }
+                catch { }
+            }
+            watchers.Clear();
+            devs.Clear();
+        }
+
+        void StartWatchers(int g)
+        {
+            foreach (string sel in Bt.Selectors())
+            {
+                try
+                {
+                    var w = global::Windows.Devices.Enumeration.DeviceInformation.CreateWatcher(sel, Bt.Props,
+                        global::Windows.Devices.Enumeration.DeviceInformationKind.AssociationEndpoint);
+                    w.Added += delegate(global::Windows.Devices.Enumeration.DeviceWatcher s, global::Windows.Devices.Enumeration.DeviceInformation d)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate { if (g != gen) return; devs[d.Id] = d; Soon(); }));
+                    };
+                    w.Updated += delegate(global::Windows.Devices.Enumeration.DeviceWatcher s, global::Windows.Devices.Enumeration.DeviceInformationUpdate u)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            if (g != gen) return;
+                            global::Windows.Devices.Enumeration.DeviceInformation d;
+                            if (devs.TryGetValue(u.Id, out d)) { try { d.Update(u); } catch { } Soon(); }
+                        }));
+                    };
+                    w.Removed += delegate(global::Windows.Devices.Enumeration.DeviceWatcher s, global::Windows.Devices.Enumeration.DeviceInformationUpdate u)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate { if (g != gen) return; if (devs.Remove(u.Id)) Soon(); }));
+                    };
+                    w.EnumerationCompleted += delegate(global::Windows.Devices.Enumeration.DeviceWatcher s, object o)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate { if (g != gen) return; Soon(); }));
+                    };
+                    watchers.Add(w);
+                    w.Start();
+                }
+                catch { }
+            }
+        }
+
+        void Soon() { if (!renderTimer.IsEnabled) renderTimer.Start(); }
+
+        List<BtDev> Collect()
+        {
+            Dictionary<string, BtDev> map = new Dictionary<string, BtDev>();
+            foreach (var d in devs.Values)
+            {
+                string name = (d.Name ?? "").Trim();
+                if (name.Length == 0) continue;
+                bool paired = (Bt.Prop(d, "System.Devices.Aep.IsPaired") as bool?) == true;
+                bool conn = (Bt.Prop(d, "System.Devices.Aep.IsConnected") as bool?) == true;
+                bool le = d.Id.IndexOf("BluetoothLE", StringComparison.OrdinalIgnoreCase) >= 0;
+                // perangkat LE asing yang tidak bisa disambungkan (beacon, TV, dll) cuma bikin ramai
+                if (!paired && le && (Bt.Prop(d, "System.Devices.Aep.Bluetooth.Le.IsConnectable") as bool?) != true) continue;
+                string key = (paired ? "p:" : "n:") + name.ToLowerInvariant();
+                BtDev x;
+                if (!map.TryGetValue(key, out x))
+                {
+                    x = new BtDev { Key = key, Name = name, Paired = paired };
+                    map[key] = x;
+                }
+                if (x.Info == null || (!le && x.Info.Id.IndexOf("BluetoothLE", StringComparison.OrdinalIgnoreCase) >= 0)) x.Info = d;
+                if (conn) x.Connected = true;
+                string addr = Bt.Prop(d, "System.Devices.Aep.DeviceAddress") as string;
+                if (addr != null && (x.Address == null || !le)) x.Address = addr.Replace(":", "").Replace("-", "").ToUpperInvariant();
+                object major = Bt.Prop(d, "System.Devices.Aep.Bluetooth.Cod.Major");
+                if (major != null && x.Major < 0) { try { x.Major = Convert.ToInt32(major); } catch { } }
+                object sig = Bt.Prop(d, "System.Devices.Aep.SignalStrength");
+                if (sig != null) { try { x.Signal = Math.Max(x.Signal, Convert.ToInt32(sig)); } catch { } }
+            }
+            List<BtDev> res = map.Values.ToList();
+            // perangkat yang sudah dipasangkan tidak usah muncul lagi di "Nearby"
+            HashSet<string> pairedNames = new HashSet<string>(res.Where(x => x.Paired).Select(x => x.Name.ToLowerInvariant()));
+            res.RemoveAll(x => !x.Paired && pairedNames.Contains(x.Name.ToLowerInvariant()));
+            return res;
+        }
+
+        void Render()
+        {
+            switchHost.Child = radioOn == null ? null : Switch(radioOn == true);
+            if (OnState != null) OnState(radioOn == null ? "Unavailable" : radioOn == false ? "Off" : "On");
+            if (radioOn != true)
+            {
+                list.Children.Clear();
+                lastSig = null;
+                status.Text = message ?? (radioOn == null ? "No Bluetooth adapter found." : "Bluetooth is off.");
+                if (busyKey == null && !radioBusy) message = null;
+                return;
+            }
+            List<BtDev> all = Collect();
+            List<BtDev> mine = all.Where(x => x.Paired).OrderBy(x => x.Connected ? 0 : 1).ThenBy(x => x.Name).ToList();
+            List<BtDev> near = all.Where(x => !x.Paired).OrderByDescending(x => x.Signal).ThenBy(x => x.Name).Take(12).ToList();
+            BtDev con = mine.FirstOrDefault(x => x.Connected);
+            if (OnState != null && con != null) OnState(con.Name);
+            if (message != null) { status.Text = message; if (busyKey == null && !radioBusy) message = null; }
+            else if (con != null) status.Text = "Connected to " + con.Name + (mine.Count(x => x.Connected) > 1 ? " +" + (mine.Count(x => x.Connected) - 1) : "");
+            else status.Text = "No device connected";
+
+            // tidak usah bangun ulang kalau tidak ada yang berubah (sinyal berubah terus)
+            StringBuilder sb = new StringBuilder();
+            sb.Append(expanded).Append('|').Append(busyKey).Append('|').Append(quiet).Append('|');
+            foreach (BtDev x in mine.Concat(near)) sb.Append(x.Key).Append(x.Connected ? '1' : '0').Append(HasAudio(x) ? 'a' : '-').Append(';');
+            string sig = sb.ToString();
+            if (sig == lastSig) return;
+            lastSig = sig;
+
+            list.Children.Clear();
+            if (mine.Count > 0)
+            {
+                list.Children.Add(Section("Your devices"));
+                foreach (BtDev x in mine) list.Children.Add(Row(x));
+            }
+            list.Children.Add(Section(near.Count > 0 ? "Nearby" : "Nearby · searching..."));
+            foreach (BtDev x in near) list.Children.Add(Row(x));
+            if (near.Count == 0 && quiet)
+            {
+                TextBlock hint = Section("Nothing new found yet. Put the device in pairing mode and keep it close.");
+                hint.TextWrapping = TextWrapping.Wrap;
+                hint.Margin = new Thickness(6, 0, 6, 0);
+                list.Children.Add(hint);
+            }
+        }
+
+        static TextBlock Section(string text)
+        {
+            TextBlock t = new TextBlock();
+            t.Text = text;
+            t.Foreground = UI.Ink(0x90);
+            t.FontSize = 11;
+            t.FontFamily = UI.Text;
+            t.Margin = new Thickness(6, 6, 0, 3);
+            return t;
+        }
+
+        bool HasAudio(BtDev x) { return x.Paired && Bt.Match(audio, x).Count > 0; }
+
+        static string Icon(BtDev x)
+        {
+            string n = x.Name.ToLowerInvariant();
+            if (x.Major == 4 || n.Contains("bud") || n.Contains("headphone") || n.Contains("headset") || n.Contains("airpods") || n.Contains("earphone")) return "";
+            if (n.Contains("speaker") || n.Contains("soundbar")) return "";
+            if (n.Contains("keyboard")) return "";
+            if (n.Contains("mouse")) return "";
+            if (n.Contains("controller") || n.Contains("gamepad")) return "";
+            if (x.Major == 2) return "";
+            if (x.Major == 1) return "";
+            if (x.Major == 5) return "";
+            return "";
+        }
+
+        FrameworkElement Row(BtDev x)
+        {
+            bool open = expanded == x.Key;
+            bool busy = busyKey == x.Key;
+            List<BtAudio> au = x.Paired ? Bt.Match(audio, x) : new List<BtAudio>();
+            StackPanel outer = new StackPanel();
+            Border b = new Border();
+            b.CornerRadius = new CornerRadius(10);
+            b.Padding = new Thickness(10, 6, 6, 6);
+            b.Margin = new Thickness(0, 1, 0, 1);
+            Brush normalBg = open ? UI.Ink(0x26) : Brushes.Transparent;
+            b.Background = normalBg;
+            b.Cursor = Cursors.Hand;
+            b.MouseEnter += delegate { b.Background = UI.Ink(0x1E); };
+            b.MouseLeave += delegate { b.Background = normalBg; };
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock ic = UI.Glyph(Icon(x), 16);
+            ic.Width = 22;
+            g.Children.Add(ic);
+            StackPanel txt = new StackPanel();
+            txt.Margin = new Thickness(10, 0, 0, 0);
+            txt.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock name = new TextBlock();
+            name.Text = x.Name;
+            name.Foreground = UI.Fg;
+            name.FontSize = 13.5;
+            name.FontFamily = UI.Text;
+            name.FontWeight = x.Connected ? FontWeights.SemiBold : FontWeights.Normal;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            txt.Children.Add(name);
+            TextBlock sub = new TextBlock();
+            sub.Text = busy ? "Working..." : x.Connected ? "Connected" : x.Paired ? "Paired" : "Ready to pair";
+            sub.Foreground = x.Connected ? (Brush)UI.AccentInk : UI.Ink(0x90);
+            sub.FontSize = 11;
+            sub.FontFamily = UI.Text;
+            txt.Children.Add(sub);
+            Grid.SetColumn(txt, 1);
+            g.Children.Add(txt);
+
+            // tombol bulat: pasangkan (perangkat baru) atau connect/disconnect (audio)
+            if (!x.Paired || au.Count > 0)
+            {
+                Border btn = new Border();
+                btn.Width = 30;
+                btn.Height = 30;
+                btn.CornerRadius = new CornerRadius(15);
+                btn.Margin = new Thickness(8, 0, 0, 0);
+                btn.VerticalAlignment = VerticalAlignment.Center;
+                btn.Cursor = busy ? Cursors.Arrow : Cursors.Hand;
+                btn.ToolTip = busy ? "Working..." : !x.Paired ? "Pair" : x.Connected ? "Disconnect" : "Connect";
+                Brush nb = x.Connected ? (Brush)new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : UI.Ink(0x26);
+                Brush hb = x.Connected ? (Brush)new SolidColorBrush(Color.FromRgb(0x7D, 0xD8, 0xFF)) : UI.Ink(0x48);
+                btn.Background = nb;
+                if (!busy)
+                {
+                    btn.MouseEnter += delegate { btn.Background = hb; };
+                    btn.MouseLeave += delegate { btn.Background = nb; };
+                }
+                TextBlock bg = UI.Glyph(busy ? "" : !x.Paired ? "" : "", 14);
+                if (x.Connected) bg.Foreground = Brushes.Black;
+                btn.Child = bg;
+                btn.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    if (busyKey != null) return;
+                    if (!x.Paired) DoPair(x);
+                    else DoAudio(x, au, !x.Connected);
+                };
+                Grid.SetColumn(btn, 2);
+                g.Children.Add(btn);
+            }
+            b.Child = g;
+            b.MouseLeftButtonUp += delegate
+            {
+                if (busyKey != null) return;
+                if (!x.Paired) { DoPair(x); return; }
+                expanded = open ? null : x.Key;
+                Render();
+            };
+            outer.Children.Add(b);
+
+            if (open && x.Paired)
+            {
+                StackPanel act = new StackPanel();
+                act.Orientation = Orientation.Horizontal;
+                act.Margin = new Thickness(38, 2, 6, 6);
+                if (au.Count == 0)
+                {
+                    TextBlock note = new TextBlock();
+                    note.Text = x.Connected ? "Connects on its own" : "Turn the device on to connect";
+                    note.Foreground = UI.Ink(0x90);
+                    note.FontSize = 11;
+                    note.FontFamily = UI.Text;
+                    note.VerticalAlignment = VerticalAlignment.Center;
+                    note.Margin = new Thickness(4, 0, 10, 0);
+                    act.Children.Add(note);
+                }
+                Border rm = new Border();
+                rm.CornerRadius = new CornerRadius(8);
+                rm.Padding = new Thickness(8, 4, 8, 4);
+                rm.Background = UI.Ink(0x1E);
+                rm.Cursor = Cursors.Hand;
+                UI.Hover(rm, 0x38);
+                StackPanel rs = new StackPanel();
+                rs.Orientation = Orientation.Horizontal;
+                rs.Children.Add(UI.Glyph("", 11));
+                TextBlock rt = new TextBlock();
+                rt.Text = "Remove device";
+                rt.Foreground = UI.Fg;
+                rt.FontSize = 11.5;
+                rt.FontFamily = UI.Text;
+                rt.Margin = new Thickness(6, 0, 0, 0);
+                rs.Children.Add(rt);
+                rm.Child = rs;
+                rm.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; DoUnpair(x); };
+                act.Children.Add(rm);
+                outer.Children.Add(act);
+            }
+            return outer;
+        }
+
+        void Busy(BtDev x, string msg)
+        {
+            busyKey = x.Key;
+            message = msg;
+            lastSig = null;
+            Render();
+        }
+
+        void Done(string msg)
+        {
+            busyKey = null;
+            message = msg;
+            lastSig = null;
+            Render();
+        }
+
+        void DoAudio(BtDev x, List<BtAudio> au, bool connect)
+        {
+            Busy(x, (connect ? "Connecting to " : "Disconnecting from ") + x.Name + "...");
+            int g = gen;
+            string key = x.Key;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                bool ok = Bt.AudioConnect(au, connect);
+                // tunggu Windows melaporkan status baru lewat watcher
+                bool done = false;
+                for (int i = 0; i < 24 && ok && !done; i++)
+                {
+                    Thread.Sleep(500);
+                    Dispatcher.Invoke(new Action(delegate
+                    {
+                        BtDev now = Collect().FirstOrDefault(d => d.Key == key);
+                        done = now != null && now.Connected == connect;
+                    }));
+                }
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (g != gen) { busyKey = null; return; }
+                    Done(!ok ? "Could not " + (connect ? "connect to " : "disconnect from ") + x.Name
+                         : done ? (connect ? "Connected to " : "Disconnected from ") + x.Name
+                         : connect ? "Could not reach " + x.Name + ". Is it on and nearby?" : null);
+                }));
+            });
+        }
+
+        void DoPair(BtDev x)
+        {
+            Busy(x, "Pairing with " + x.Name + "...");
+            int g = gen;
+            var info = x.Info;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string err = Bt.Pair(info, delegate(string pin)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate { message = "Pairing with " + x.Name + " - PIN " + pin; Render(); }));
+                });
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (g != gen) { busyKey = null; return; }
+                    Done(err ?? "Paired with " + x.Name);
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        List<BtAudio> au = Bt.AudioFilters();
+                        Dispatcher.BeginInvoke(new Action(delegate { if (g == gen) { audio = au; lastSig = null; Render(); } }));
+                    });
+                }));
+            });
+        }
+
+        void DoUnpair(BtDev x)
+        {
+            Busy(x, "Removing " + x.Name + "...");
+            int g = gen;
+            var info = x.Info;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string err = Bt.Unpair(info);
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (g != gen) { busyKey = null; return; }
+                    expanded = null;
+                    Done(err ?? "Removed " + x.Name);
+                }));
+            });
+        }
+    }
+
     // ----- Quick Settings versi dock -----
     class QuickPop : Popover
     {
@@ -4653,7 +5587,11 @@ namespace SlideDock
         int pendingBright = -1;
         public Action OnWifi;
         readonly WifiPanel wifiPanel = new WifiPanel();
-        readonly Border wifiArea = new Border();
+        readonly BtPanel btPanel = new BtPanel();
+        readonly TextBlock btName = new TextBlock();
+        readonly Border wifiArea = new Border();      // panel samping: Wi-Fi atau Bluetooth
+        StackPanel mainCol;                           // ubin + slider Quick Settings
+        bool sideLeft;                                // panel samping dibuka di kiri ubin
 
         // satu popup, beberapa tampilan: tiap ikon dock membuka pengaturannya sendiri,
         // "all" = Quick Settings lengkap (dibuka dari tautan "Quick Settings" di bawah tiap tampilan)
@@ -4674,11 +5612,28 @@ namespace SlideDock
         FrameworkElement brightRow2;
         Action<double> onBright, onBrightDone;
 
-        void ToggleWifi()
+        void ToggleSide(FrameworkElement panel)
         {
-            if (wifiArea.Visibility == Visibility.Visible) { wifiArea.Visibility = Visibility.Collapsed; return; }
+            bool shown = wifiArea.Visibility == Visibility.Visible;
+            if (shown && wifiArea.Child == panel)
+            {
+                HoldEdge(!sideLeft);
+                wifiArea.Visibility = Visibility.Collapsed;
+                return;
+            }
+            if (!shown)
+            {
+                // dock kanan: buka ke kiri (menjauhi dock). Dock bawah: ke kanan bila muat di layar, kalau tidak ke kiri.
+                double panelW = 300 + 28 + 1;
+                sideLeft = Layout.Side == 2 || (Layout.Side == 0 && FinalLeft + ActualWidth + panelW > Popover.Scr.Right);
+                Grid.SetColumn(mainCol, sideLeft ? 1 : 0);
+                Grid.SetColumn(wifiArea, sideLeft ? 0 : 1);
+                wifiArea.BorderThickness = sideLeft ? new Thickness(0, 0, 1, 0) : new Thickness(1, 0, 0, 0);
+                HoldEdge(!sideLeft);
+            }
+            if (wifiArea.Child != panel) { Detach(panel); wifiArea.Child = panel; }
             wifiArea.Visibility = Visibility.Visible;
-            wifiPanel.Start();
+            if (panel == wifiPanel) wifiPanel.Start(); else btPanel.Start();
         }
 
         public QuickPop()
@@ -4691,7 +5646,7 @@ namespace SlideDock
             UniformGrid tiles = new UniformGrid();
             tiles.Columns = 3;
             tiles.Children.Add(Tile("", "Wi-Fi", wifiName, "slidedock:wifi"));
-            tiles.Children.Add(Tile("", "Bluetooth", null, "ms-settings:bluetooth"));
+            tiles.Children.Add(Tile("", "Bluetooth", btName, "slidedock:bluetooth"));
             tiles.Children.Add(Tile("", "Airplane mode", null, "ms-settings:network-airplanemode"));
             tiles.Children.Add(Tile("", "Energy saver", null, "ms-settings:batterysaver"));
             tiles.Children.Add(Tile("", "Night light", null, "ms-settings:nightlight"));
@@ -4748,6 +5703,7 @@ namespace SlideDock
             two.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             two.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             two.Children.Add(sp);
+            mainCol = sp;
             wifiArea.BorderBrush = UI.Ink(0x26);
             wifiArea.BorderThickness = new Thickness(1, 0, 0, 0);
             wifiArea.Margin = new Thickness(0, 14, 0, 12);
@@ -4757,6 +5713,8 @@ namespace SlideDock
             Grid.SetColumn(wifiArea, 1);
             two.Children.Add(wifiArea);
             wifiPanel.OnClose = delegate { HidePanel(); };
+            btPanel.OnClose = delegate { HidePanel(); };
+            btPanel.OnState = delegate(string t) { btName.Text = t; };
             allView = two;
 
             BuildWifiView();
@@ -5054,15 +6012,17 @@ namespace SlideDock
             UpdateBattery();
             bool wantSsid = Mode == "all";
             bool wantBright = Mode == "all" || Mode == "battery";
-            if (wantSsid) wifiName.Text = "...";
+            if (wantSsid) { wifiName.Text = "..."; btName.Text = "..."; }
             if (!wantSsid && !wantBright) return;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string ssid = wantSsid ? SysInfo.Ssid() : null;
+                bool? bt = wantSsid ? Bt.IsOn() : null;
                 int b = wantBright ? SysInfo.Brightness() : -1;
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     if (wantSsid) wifiName.Text = ssid ?? "Not connected";
+                    if (wantSsid) btName.Text = bt == null ? "Unavailable" : bt == true ? "On" : "Off";
                     if (!wantBright) return;
                     Visibility vis = b < 0 ? Visibility.Collapsed : Visibility.Visible;
                     brightRow.Visibility = vis;
@@ -5141,7 +6101,8 @@ namespace SlideDock
             b.Child = sp;
             b.MouseLeftButtonUp += delegate
             {
-                if (uri == "slidedock:wifi") { ToggleWifi(); return; }   // Quick Settings tetap terbuka
+                if (uri == "slidedock:wifi") { ToggleSide(wifiPanel); return; }   // Quick Settings tetap terbuka
+                if (uri == "slidedock:bluetooth") { ToggleSide(btPanel); return; }
                 HidePanel();
                 Launcher.Open(uri);
             };
