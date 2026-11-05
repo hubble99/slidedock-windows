@@ -9783,6 +9783,7 @@ namespace SlideDock
                 Show();
             }
             if (hiddenForFullscreen) return;
+            KeepOnTop();
             UpdateItems();
             if (tick % 5 == 0) { UpdateBin(); UpdateStatus(); }
             else if (!compact) UpdateVolume();
@@ -9870,6 +9871,81 @@ namespace SlideDock
             src.AddHook(WndProc);
             HotkeyOk = IsPrimary && Native.RegisterHotKey(hwnd, 1, Native.MOD_WIN | Native.MOD_ALT | Native.MOD_NOREPEAT, Native.VK_SPACE);
             ApplyBlur();
+            topHook = delegate(IntPtr hk, uint ev, IntPtr w, int obj, int child, uint thread, uint time)
+            {
+                if (obj != 0) return;                                   // OBJID_WINDOW saja
+                if (ev != 0x0003 && ev != 0x000B && ev != 0x0017) return; // FOREGROUND, MOVESIZEEND, MINIMIZEEND
+                // jendela app baru saja naik ke depan: periksa setelah Windows selesai menata urutannya
+                Dispatcher.BeginInvoke(new Action(KeepOnTop), DispatcherPriority.Background);
+            };
+            topHookHandle = SetWinEventHook(0x0003, 0x0017, IntPtr.Zero, topHook, 0, 0, 0x0002);   // OUTOFCONTEXT | SKIPOWNPROCESS
+            Closed += delegate { if (topHookHandle != IntPtr.Zero) UnhookWinEvent(topHookHandle); topHookHandle = IntPtr.Zero; };
+        }
+
+        // ----- dock selalu di lapisan paling atas -----
+        // Dock memakai "selalu di atas" (Topmost), tetapi status itu kadang hilang (Show desktop, ganti
+        // desktop virtual, sleep/resume, layar dicolok/dicabut, app lain mengubahnya), atau app lain juga
+        // "selalu di atas" dan baru saja diklik. Akibatnya jendela app bisa menutupi dock/notch.
+        // Di sini dock dinaikkan lagi bila ada jendela app lain di atasnya yang menimpa bagian dock yang terlihat.
+        delegate void WinEventProc(IntPtr hook, uint ev, IntPtr h, int obj, int child, uint thread, uint time);
+        [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
+        [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
+        [DllImport("user32.dll")] static extern IntPtr GetWindow(IntPtr h, uint cmd);
+        [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+        [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
+        WinEventProc topHook;                // disimpan agar tidak dibersihkan GC selama hook terpasang
+        IntPtr topHookHandle;
+
+        void KeepOnTop()
+        {
+            if (hwnd == IntPtr.Zero || !IsVisible || hiddenForFullscreen) return;
+            const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+            const int WS_POPUP = unchecked((int)0x80000000), WS_CAPTION = 0x00C00000;
+            bool lost = (Native.GetWindowLong(hwnd, Native.GWL_EXSTYLE) & WS_EX_TOPMOST) == 0;
+            List<IntPtr> ownAbove = new List<IntPtr>();       // popup/menu/preview milik SlideDock di atas dock
+            bool covered = lost;
+            if (!lost)
+            {
+                FrameworkElement vis = compact ? (FrameworkElement)notch : fullCard;
+                if (vis == null || vis.ActualWidth <= 0) return;
+                Point a, b;
+                try
+                {
+                    a = vis.PointToScreen(new Point(0, 0));
+                    b = vis.PointToScreen(new Point(vis.ActualWidth, vis.ActualHeight));
+                }
+                catch (InvalidOperationException) { return; }
+                int l = (int)Math.Min(a.X, b.X), t = (int)Math.Min(a.Y, b.Y), r = (int)Math.Max(a.X, b.X), btm = (int)Math.Max(a.Y, b.Y);
+                StringBuilder cls = new StringBuilder(64);
+                // hanya jendela di atas dock (jumlahnya sedikit: sesama "selalu di atas")
+                for (IntPtr h = GetWindow(hwnd, 3); h != IntPtr.Zero; h = GetWindow(h, 3))   // GW_HWNDPREV
+                {
+                    if (!IsWindowVisible(h)) continue;
+                    int cloaked;
+                    if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) continue;   // desktop virtual lain
+                    uint pid;
+                    Native.GetWindowThreadProcessId(h, out pid);
+                    if (pid == ownPid) { ownAbove.Add(h); continue; }
+                    if (covered) continue;                   // sisanya cuma mencari popup SlideDock
+                    RECT wr;
+                    if (!GetWindowRect(h, out wr) || wr.right <= l || wr.left >= r || wr.bottom <= t || wr.top >= btm) continue;
+                    int ex = Native.GetWindowLong(h, Native.GWL_EXSTYLE), st = Native.GetWindowLong(h, -16);
+                    // menu, tooltip & overlay kecil app lain tetap boleh tampil di atas dock
+                    if ((ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) continue;
+                    if ((st & WS_POPUP) != 0 && (st & WS_CAPTION) != WS_CAPTION) continue;
+                    cls.Length = 0;
+                    Native.GetClassName(h, cls, 64);
+                    string c = cls.ToString();
+                    if (c == "#32768" || c == "tooltips_class32" || c == "SysShadow") continue;
+                    covered = true;
+                }
+            }
+            if (!covered) return;
+            const uint f = 0x0001 | 0x0002 | 0x0010 | 0x0200;          // NOSIZE | NOMOVE | NOACTIVATE | NOOWNERZORDER
+            Native.SetWindowPos(hwnd, new IntPtr(-1), 0, 0, 0, 0, f);  // HWND_TOPMOST: paling depan
+            // popup SlideDock yang tadi di atas dock dikembalikan ke atasnya, urutannya tetap
+            // (yang terdekat dengan dock dinaikkan duluan, yang paling atas terakhir)
+            foreach (IntPtr h in ownAbove) Native.SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, f);
         }
 
         IntPtr WndProc(IntPtr h, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
