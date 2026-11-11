@@ -4229,7 +4229,13 @@ namespace SlideDock
     }
 
     // ----- Wi-Fi versi dock -----
-    class WifiNet { public string Ssid; public string Auth; public int Signal; public bool Known; public bool Connected; }
+    class WifiNet
+    {
+        public string Ssid; public string Auth; public int Signal; public bool Known; public bool Connected;
+        public int Cipher;          // DOT11_CIPHER_ALGORITHM jaringan (2 TKIP, 4 CCMP/AES, 8 GCMP, 9 GCMP-256)
+        public bool Connectable;    // Windows bilang entri ini bisa disambung
+        public bool Stale;          // ada profil tersimpan, tapi tidak cocok lagi dengan jaringannya
+    }
 
     static class Wifi
     {
@@ -4305,9 +4311,11 @@ namespace SlideDock
                             Marshal.Copy(new IntPtr(b + 516), raw, 0, len);
                             WifiNet w = new WifiNet();
                             w.Ssid = Encoding.UTF8.GetString(raw);
+                            w.Connectable = Marshal.ReadInt32(new IntPtr(b + 556)) != 0;
                             w.Signal = Marshal.ReadInt32(new IntPtr(b + 604));
                             bool sec = Marshal.ReadInt32(new IntPtr(b + 608)) != 0;
                             w.Auth = AuthName(Marshal.ReadInt32(new IntPtr(b + 612)), sec);
+                            w.Cipher = Marshal.ReadInt32(new IntPtr(b + 616));
                             int flags = Marshal.ReadInt32(new IntPtr(b + 620));
                             w.Connected = (flags & 1) != 0;                    // WLAN_AVAILABLE_NETWORK_CONNECTED
                             w.Known = (flags & 2) != 0;                        // ..._HAS_PROFILE
@@ -4332,12 +4340,21 @@ namespace SlideDock
             if (nat != null)
             {
                 // satu SSID bisa muncul dua kali (dengan & tanpa profil tersimpan): gabungkan
+                // keamanan diambil dari entri tanpa profil bila ada: itu yang disiarkan jaringan sekarang
                 List<WifiNet> merged = nat.Where(x => x.Ssid.Length > 0).GroupBy(x => x.Ssid).Select(g =>
                 {
-                    WifiNet m = g.OrderByDescending(x => x.Signal).First();
+                    WifiNet src = g.Where(x => !x.Known).OrderByDescending(x => x.Signal).FirstOrDefault()
+                                  ?? g.OrderByDescending(x => x.Signal).First();
+                    WifiNet m = new WifiNet();
+                    m.Ssid = g.Key;
+                    m.Auth = src.Auth;
+                    m.Cipher = src.Cipher;
                     m.Signal = g.Max(x => x.Signal);
                     m.Known = g.Any(x => x.Known);
                     m.Connected = g.Any(x => x.Connected);
+                    m.Connectable = g.Any(x => x.Connectable);
+                    // profil tersimpan ditolak Windows (mis. jaringan pindah WPA3 -> WPA2): "not connectible"
+                    m.Stale = m.Known && !m.Connected && !g.Any(x => x.Known && x.Connectable);
                     return m;
                 }).ToList();
                 return merged.OrderByDescending(x => x.Connected).ThenByDescending(x => x.Signal).ToList();
@@ -4362,6 +4379,12 @@ namespace SlideDock
                 if (n == null) continue;
                 Match ma = Regex.Match(line, @"^\s*Authentication\s*:\s*(.+)$");
                 if (ma.Success) n.Auth = ma.Groups[1].Value.Trim();
+                Match me = Regex.Match(line, @"^\s*Encryption\s*:\s*(.+)$");
+                if (me.Success)
+                {
+                    string e = me.Groups[1].Value.Trim().ToUpperInvariant();
+                    n.Cipher = e == "TKIP" ? 2 : e == "GCMP-256" ? 9 : e == "GCMP" ? 8 : 4;
+                }
                 Match sg = Regex.Match(line, @"^\s*Signal\s*:\s*(\d+)%");
                 if (sg.Success) n.Signal = Math.Max(n.Signal, int.Parse(sg.Groups[1].Value));
             }
@@ -4412,9 +4435,9 @@ namespace SlideDock
                 string auth, enc;
                 if (a.Contains("enterprise")) return "Enterprise networks need Network settings.";
                 if (a.Contains("open")) { auth = "open"; enc = "none"; }
-                else if (a.Contains("wpa3")) { auth = "WPA3SAE"; enc = "AES"; }
-                else if (a.Contains("wpa2")) { auth = "WPA2PSK"; enc = "AES"; }
-                else if (a.Contains("wpa")) { auth = "WPAPSK"; enc = "AES"; }
+                else if (a.Contains("wpa3")) { auth = "WPA3SAE"; enc = EncName(n.Cipher); }
+                else if (a.Contains("wpa2")) { auth = "WPA2PSK"; enc = EncName(n.Cipher); }
+                else if (a.Contains("wpa")) { auth = "WPAPSK"; enc = EncName(n.Cipher); }
                 else return "This network type is not supported here.";
                 string ssid = System.Security.SecurityElement.Escape(n.Ssid);
                 string key = enc == "none" ? "" :
@@ -4442,7 +4465,19 @@ namespace SlideDock
 
         public static void Disconnect() { Run("wlan disconnect"); }
 
-        public static void DeleteProfile(string ssid) { Run("wlan delete profile name=\"" + ssid.Replace("\"", "") + "\""); }
+        // enkripsi profil baru mengikuti jaringannya (dulu selalu AES: router TKIP/GCMP ditolak "cipher not found")
+        static string EncName(int cipher)
+        {
+            switch (cipher)
+            {
+                case 2: return "TKIP";
+                case 8: return "GCMP";
+                case 9: return "GCMP256";
+                default: return "AES";
+            }
+        }
+
+        public static bool DeleteProfile(string ssid) { string o; return RunCode("wlan delete profile name=\"" + ssid.Replace("\"", "") + "\"", out o) == 0; }
     }
 
     class WifiPanel : StackPanel
@@ -4453,6 +4488,7 @@ namespace SlideDock
         string expanded;
         string message;
         string busySsid;                // jaringan yang sedang connect/disconnect
+        string forgetSsid;              // jaringan tersimpan yang gagal: tampilkan saran "Forget lalu sambung ulang"
 
         public WifiPanel()
         {
@@ -4538,6 +4574,7 @@ namespace SlideDock
         public void Start()
         {
             expanded = null;
+            forgetSsid = null;
             message = null;
             list.Children.Clear();
             status.Text = "Scanning...";
@@ -4682,6 +4719,9 @@ namespace SlideDock
                 Dispatcher.BeginInvoke(new Action(delegate { pwRef.Focus(); }), DispatcherPriority.Input);
             }
 
+            // profil tersimpan tidak bisa dipakai lagi: sarankan Forget dulu, bukan langsung minta kata sandi
+            if (forgetSsid == n.Ssid && n.Known && !n.Connected) outer.Children.Add(ForgetHint(n));
+
             PasswordBox pwFinal = pw;
             link.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
             {
@@ -4698,6 +4738,14 @@ namespace SlideDock
                         Thread.Sleep(1200);
                         Dispatcher.BeginInvoke(new Action(delegate { busySsid = null; message = "Disconnected from " + n.Ssid; Refresh(); }));
                     });
+                    return;
+                }
+                if (n.Known && n.Stale)
+                {
+                    // Windows sudah menolak profil ini; netsh hanya akan memberi error yang membingungkan
+                    forgetSsid = forgetSsid == n.Ssid ? null : n.Ssid;
+                    expanded = null;
+                    Render(last);
                     return;
                 }
                 if (n.Known || Wifi.IsOpen(n)) { DoConnect(n, null); return; }
@@ -4726,11 +4774,74 @@ namespace SlideDock
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     busySsid = null;
-                    message = ok ? "Connected to " + n.Ssid : (err ?? "Could not connect to " + n.Ssid + ". Check the password.");
-                    if (ok) expanded = null;
+                    if (ok) { expanded = null; forgetSsid = null; message = "Connected to " + n.Ssid; }
+                    else if (wasKnown) { forgetSsid = n.Ssid; message = "Could not connect to " + n.Ssid + " with its saved settings."; }
+                    else message = err ?? "Could not connect to " + n.Ssid + ". Check the password.";
                     Refresh();
                 }));
             });
+        }
+
+        FrameworkElement ForgetHint(WifiNet n)
+        {
+            StackPanel act = new StackPanel();
+            act.Margin = new Thickness(42, 4, 6, 8);
+            TextBlock t = new TextBlock();
+            t.Text = "The saved settings for this network don't work anymore. Its password or security may have changed. Forget it, then connect again.";
+            t.Foreground = UI.Ink(0xB0);
+            t.FontSize = 11.5;
+            t.FontFamily = UI.Text;
+            t.TextWrapping = TextWrapping.Wrap;
+            act.Children.Add(t);
+
+            bool busy = busySsid != null;
+            Border btn = new Border();
+            btn.CornerRadius = new CornerRadius(8);
+            btn.Padding = new Thickness(12, 5, 12, 5);
+            btn.Margin = new Thickness(0, 7, 0, 0);
+            btn.HorizontalAlignment = HorizontalAlignment.Left;
+            btn.Background = UI.Ink(0x26);
+            btn.Cursor = busy ? Cursors.Arrow : Cursors.Hand;
+            if (!busy)
+            {
+                btn.MouseEnter += delegate { btn.Background = UI.Ink(0x48); };
+                btn.MouseLeave += delegate { btn.Background = UI.Ink(0x26); };
+            }
+            TextBlock bt = new TextBlock();
+            bt.Text = busySsid == n.Ssid ? "Forgetting..." : "Forget network";
+            bt.Foreground = UI.Fg;
+            bt.FontSize = 12;
+            bt.FontFamily = UI.Text;
+            btn.Child = bt;
+            btn.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                e.Handled = true;
+                if (busySsid != null) return;
+                busySsid = n.Ssid;
+                Render(last);
+                status.Text = "Forgetting " + n.Ssid + "...";
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    bool ok = Wifi.DeleteProfile(n.Ssid);
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        busySsid = null;
+                        forgetSsid = null;
+                        if (ok)
+                        {
+                            n.Known = false;
+                            n.Stale = false;
+                            bool open = Wifi.IsOpen(n);
+                            expanded = open ? null : n.Ssid;     // langsung tampilkan kotak kata sandi
+                            message = "Forgot " + n.Ssid + (open ? ". Press the link icon to connect again." : ". Type the password to connect again.");
+                        }
+                        else message = "Could not forget " + n.Ssid + ". Open Network settings > Manage known networks.";
+                        Refresh();
+                    }));
+                });
+            };
+            act.Children.Add(btn);
+            return act;
         }
     }
 
