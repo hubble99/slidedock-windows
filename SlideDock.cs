@@ -343,6 +343,38 @@ namespace SlideDock
         // 0 = otomatis (menurut ukuran layar), 1 = kecil, 2 = sedang, 3 = besar
         public static int DockSize { get { return Get("docksize", 0); } set { Set("docksize", value); } }
         public static bool DockMove { get { return Get("dockmove", 0) != 0; } set { Set("dockmove", value ? 1 : 0); } }
+        // panel Volume & Battery: true = Simple (tombol ikon + tooltip), false = Detailed (tombol berlabel)
+        public static bool SimplePanels { get { return Get("simplepanels", 0) != 0; } set { Set("simplepanels", value ? 1 : 0); } }
+
+        // ---- perilaku dock ----
+        // 0 = Floating (melayang di atas app, bisa jadi notch), 1 = Fixed (memesan ruang layar seperti taskbar),
+        // 2 = Auto-hide (sembunyi penuh, muncul saat kursor menyentuh tepi layar)
+        public static int DockMode { get { return Get("dockmode", 0); } set { Set("dockmode", value); } }
+        public static bool HideFullscreen { get { return Get("hidefullscreen", 1) != 0; } set { Set("hidefullscreen", value ? 1 : 0); } }
+        // notch hanya dipakai di mode Floating
+        public static bool NotchOn { get { return Notch && DockMode == 0; } }
+
+        // ---- isi dock ----
+        // 0 = pin & app terbuka, 1 = pin saja, 2 = app terbuka saja
+        public static int ShowApps { get { return Get("showapps", 0); } set { Set("showapps", value); } }
+        // 0 = app dari semua layar, 1 = hanya app yang jendelanya di layar dock ini
+        public static int AppsFrom { get { return Get("appsfrom", 0); } set { Set("appsfrom", value); } }
+        public static bool Shows(string part) { return Get("show." + part, part == "bin" ? 0 : 1) != 0; }
+        public static void SetShows(string part, bool on) { Set("show." + part, on ? 1 : 0); }
+
+        // ---- interaksi ----
+        // 0 = bawa ke depan saja, 1 = bawa ke depan atau minimize (klik app yang sedang aktif)
+        public static int ClickOpen { get { return Get("clickopen", 1); } set { Set("clickopen", value); } }
+        // 0 = buka jendela baru, 1 = tutup, 2 = tidak ada
+        public static int MiddleClick { get { return Get("middleclick", 2); } set { Set("middleclick", value); } }
+        public static bool Previews { get { return Get("previews", 1) != 0; } set { Set("previews", value ? 1 : 0); } }
+
+        // ---- tampilan kecil ----
+        public static bool Clock12 { get { return Get("clock12", 0) != 0; } set { Set("clock12", value ? 1 : 0); } }
+        public static bool ShowDate { get { return Get("showdate", 1) != 0; } set { Set("showdate", value ? 1 : 0); } }
+        public static bool BatteryPct { get { return Get("batterypct", 1) != 0; } set { Set("batterypct", value ? 1 : 0); } }
+        // penanda app terbuka: 0 = garis (aktif panjang), 1 = titik, 2 = tidak ada
+        public static int Indicator { get { return Get("indicator", 0); } set { Set("indicator", value); } }
     }
 
     static class Launcher
@@ -1607,6 +1639,75 @@ namespace SlideDock
             b.MouseEnter += delegate { b.Background = UI.Ink(alpha); };
             b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
         }
+
+        // ---- rasa klik: tombol mengecil sedikit saat ditekan, lalu memantul balik saat dilepas ----
+        // ScaleTransform milik elemen (dibuat bila elemen belum punya transform). null = elemen memakai transform lain.
+        public static ScaleTransform PressScale(UIElement el)
+        {
+            Transform t = el.RenderTransform;
+            ScaleTransform st = t as ScaleTransform;
+            TransformGroup g = t as TransformGroup;
+            if (st == null && g != null)
+                foreach (Transform x in g.Children) { st = x as ScaleTransform; if (st != null) break; }
+            if (st == null)
+            {
+                if (t != null && t != Transform.Identity) return null;
+                st = new ScaleTransform(1, 1);
+                el.RenderTransformOrigin = new Point(0.5, 0.5);
+                el.RenderTransform = st;
+            }
+            return st.IsFrozen ? null : st;
+        }
+
+        static void ScaleTo(ScaleTransform st, AnimationTimeline a)
+        {
+            st.BeginAnimation(ScaleTransform.ScaleXProperty, a);
+            st.BeginAnimation(ScaleTransform.ScaleYProperty, a);
+        }
+
+        // seberapa dalam tombol "masuk": tombol kecil terasa jelas, baris lebar cukup sedikit (maks ~6 px)
+        public static double PressDepth(FrameworkElement el)
+        {
+            double big = Math.Max(el.ActualWidth, el.ActualHeight);
+            return big > 0 ? 1 - Math.Min(0.08, 6 / big) : 0.95;
+        }
+
+        public static void PressIn(UIElement el, double scale)
+        {
+            ScaleTransform st = PressScale(el);
+            if (st == null) return;
+            ScaleTo(st, new DoubleAnimation(scale, TimeSpan.FromMilliseconds(90)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } });
+        }
+
+        // heldMs = lama tombol ditekan. Klik yang sangat cepat tetap "masuk" penuh dulu, baru memantul,
+        // jadi setiap klik terasa walau tombol hanya disentuh sekejap.
+        public static void PressOut(UIElement el, double scale, double heldMs)
+        {
+            ScaleTransform st = PressScale(el);
+            if (st == null) return;
+            double rest = Math.Max(0, 90 - heldMs);
+            DoubleAnimationUsingKeyFrames a = new DoubleAnimationUsingKeyFrames();
+            if (rest > 0)
+                a.KeyFrames.Add(new EasingDoubleKeyFrame(scale, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(rest)),
+                    new QuadraticEase { EasingMode = EasingMode.EaseOut }));
+            a.KeyFrames.Add(new EasingDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(rest + 280)),
+                new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.6 }));
+            ScaleTo(st, a);
+        }
+
+        // cari tombol yang ditekan: elemen terdekat (dari titik klik ke atas) yang ber-kursor tangan
+        public static FrameworkElement PressTarget(DependencyObject d, DependencyObject stop)
+        {
+            while (d != null && d != stop)
+            {
+                if (d is FlatSlider) return null;                 // slider diseret, bukan diklik
+                FrameworkElement fe = d as FrameworkElement;
+                if (fe != null && fe.ReadLocalValue(FrameworkElement.CursorProperty) == (object)Cursors.Hand)
+                    return fe.IsEnabled ? fe : null;
+                d = d is Visual ? VisualTreeHelper.GetParent(d) : LogicalTreeHelper.GetParent(d);
+            }
+            return null;
+        }
     }
 
     // baterai sebagai cincin: lingkaran putih terisi sesuai persen, angka di tengah.
@@ -1653,6 +1754,13 @@ namespace SlideDock
             Children.Add(num);
             Children.Add(bolt);
             Set(100, false);
+        }
+
+        // angka persen di tengah cincin (bisa dimatikan: cincin saja, persen di tooltip)
+        public bool ShowNumber
+        {
+            get { return num.Visibility == Visibility.Visible; }
+            set { num.Visibility = value ? Visibility.Visible : Visibility.Collapsed; }
         }
 
         public static readonly Color Blue = Color.FromRgb(0x60, 0xCD, 0xFF);
@@ -1802,6 +1910,19 @@ namespace SlideDock
         double anchorCenter = -1;
         public DateTime HiddenAt = DateTime.MinValue;
 
+        FrameworkElement pressEl;
+        double pressDepth = 1;
+        DateTime pressAt;
+
+        // lepaskan tombol yang sedang ditekan (memantul balik ke ukuran normal)
+        protected void CancelPress()
+        {
+            if (pressEl == null) return;
+            FrameworkElement el = pressEl;
+            pressEl = null;
+            UI.PressOut(el, pressDepth, (DateTime.Now - pressAt).TotalMilliseconds);
+        }
+
         public bool IsOpen { get { return IsVisible && !closing; } }
         public bool JustHidden { get { return (DateTime.Now - HiddenAt).TotalMilliseconds < 400; } }
 
@@ -1816,12 +1937,32 @@ namespace SlideDock
             SizeToContent = SizeToContent.WidthAndHeight;
             Deactivated += delegate
             {
+                CancelPress();
                 if (IsOpen && (DateTime.Now - shownAt).TotalMilliseconds > 300) HidePanel();
             };
             PreviewKeyDown += delegate(object s, KeyEventArgs e)
             {
                 if (e.Key == Key.Escape) { HidePanel(); e.Handled = true; }
             };
+            // rasa klik untuk semua tombol di popup: tekan = mengecil, lepas = memantul balik
+            PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                CancelPress();
+                FrameworkElement el = UI.PressTarget(e.OriginalSource as DependencyObject, this);
+                if (el == null || UI.PressScale(el) == null) return;
+                pressEl = el;
+                pressDepth = UI.PressDepth(el);
+                pressAt = DateTime.Now;
+                UI.PressIn(el, pressDepth);
+            };
+            PreviewMouseLeftButtonUp += delegate { CancelPress(); };
+            PreviewMouseMove += delegate(object s, MouseEventArgs e)
+            {
+                if (pressEl == null) return;
+                Point q = e.GetPosition(pressEl);                 // kursor keluar dari tombol: batal, tombol kembali
+                if (q.X < 0 || q.Y < 0 || q.X > pressEl.ActualWidth || q.Y > pressEl.ActualHeight) CancelPress();
+            };
+            IsVisibleChanged += delegate { if (!IsVisible) CancelPress(); };
             SizeChanged += delegate
             {
                 if (!IsOpen || anchorBottom < 0) return;
@@ -2260,16 +2401,20 @@ namespace SlideDock
             File.WriteAllLines(FileP, l.Select(p => p.Target + "|" + p.Name).ToArray());
         }
 
-        public static void Swap(string a, string b)
+        // simpan urutan baru (hasil seret di Start); item yang tidak ada di daftar tetap di belakang
+        public static void Reorder(List<string> order)
         {
             List<PinItem> l = Load();
-            int i = l.FindIndex(p => string.Equals(p.Target, a, StringComparison.OrdinalIgnoreCase));
-            int j = l.FindIndex(p => string.Equals(p.Target, b, StringComparison.OrdinalIgnoreCase));
-            if (i < 0 || j < 0 || i == j) return;
-            PinItem tmp = l[i];
-            l[i] = l[j];
-            l[j] = tmp;
-            Save(l);
+            List<PinItem> res = new List<PinItem>();
+            foreach (string t in order)
+            {
+                int i = l.FindIndex(p => string.Equals(p.Target, t, StringComparison.OrdinalIgnoreCase));
+                if (i < 0) continue;
+                res.Add(l[i]);
+                l.RemoveAt(i);
+            }
+            res.AddRange(l);
+            Save(res);
         }
 
         public static bool Contains(string target)
@@ -3299,6 +3444,8 @@ namespace SlideDock
             PreviewMouseMove += delegate(object s, MouseEventArgs e) { DragUpdate(e); };
             PreviewMouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { if (DragEnd()) e.Handled = true; };
             LostMouseCapture += delegate(object s, MouseEventArgs e) { if (e.OriginalSource == this && dragging && !ending) { pressed = false; ResetDrag(); } };
+            scrollTimer.Interval = TimeSpan.FromMilliseconds(16);
+            scrollTimer.Tick += delegate { AutoScroll(); };
             card.Child = root;
             Content = card;
 
@@ -3818,7 +3965,27 @@ namespace SlideDock
             knob.Margin = new Thickness(3);
             knob.HorizontalAlignment = on ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             b.Child = knob;
-            b.MouseLeftButtonUp += delegate { toggle(); };
+            // kenop meluncur & warna berganti dulu (~170 ms), baru pengaturan diterapkan (daftar digambar ulang)
+            bool busy = false;
+            b.MouseLeftButtonUp += delegate
+            {
+                if (busy) return;
+                busy = true;
+                TimeSpan d = TimeSpan.FromMilliseconds(170);
+                IEasingFunction ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
+                TranslateTransform tt = new TranslateTransform();
+                knob.RenderTransform = tt;
+                DoubleAnimation slide = new DoubleAnimation(on ? -20 : 20, d) { EasingFunction = ease };
+                slide.Completed += delegate { toggle(); };
+                tt.BeginAnimation(TranslateTransform.XProperty, slide);
+                Color offC = UI.InkColor(0x40), onC = Color.FromRgb(0x60, 0xCD, 0xFF);
+                SolidColorBrush track = new SolidColorBrush(on ? onC : offC);
+                b.Background = track;
+                track.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(on ? offC : onC, d) { EasingFunction = ease });
+                SolidColorBrush kb = new SolidColorBrush(on ? Colors.Black : UI.InkColor(0xFF));
+                knob.Background = kb;
+                kb.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(on ? UI.InkColor(0xFF) : Colors.Black, d) { EasingFunction = ease });
+            };
             return b;
         }
 
@@ -3861,35 +4028,88 @@ namespace SlideDock
             catch { }
         }
 
-        // ----- susun ulang: seret ikon ke ikon lain untuk tukar tempat -----
+        // ----- susun ulang: seret ikon ke posisi baru; ikon lain bergeser (kiri/kanan) memberi tempat -----
+        // Ikon tidak ditukar: ikon yang diseret disisipkan di posisi tujuan, ikon di antaranya bergeser satu slot.
         readonly Canvas dragLayer = new Canvas();
-        Border dragSrc, hoverTile, ghost;
+        Border dragSrc, ghost;
         GhostWin ghostWin;
-        // sorotan ikon tujuan digambar di jendela kecil terpisah (seperti ghost), bukan di panel Start:
-        // panel Start yang besar tidak perlu digambar ulang selama menyeret -> gerakan tetap ~60 fps
-        GhostWin hlWin;
-        ScaleTransform hlScale;
         Point downPt;
-        bool pressed, dragging, ending;
+        Point ghostPx;                         // pojok kiri atas jendela ghost (piksel layar)
+        bool pressed, dragging, ending, settling;
+        List<Border> reTiles;                  // tile Start, urutan saat seret dimulai
+        List<Rect> reSlots;                    // posisi slot tiap tile di grid (tanpa geseran)
+        int reFrom, reTo;
+        Vector iconOff;                        // pusat ikon dihitung dari pojok kiri atas tile
+        readonly DispatcherTimer scrollTimer = new DispatcherTimer();
+        EventHandler flight;
+        Action flightDone;
 
         void EnableSwap(Border t, string target)
         {
             t.Tag = target;
             t.RenderTransformOrigin = new Point(0.5, 0.5);
+            // skala (rasa klik & mendarat) + geser (memberi tempat) dipakai bersama tanpa saling menimpa
+            TransformGroup g = new TransformGroup();
+            g.Children.Add(new ScaleTransform(1, 1));
+            g.Children.Add(new TranslateTransform());
+            t.RenderTransform = g;
             t.PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
             {
+                if (settling) return;
                 pressed = true;
                 dragSrc = t;
                 downPt = e.GetPosition(dragLayer);
             };
         }
 
-        static ImageSource IconOfTile(Border tile)
+        static TranslateTransform ShiftOf(UIElement el)
+        {
+            TransformGroup g = el.RenderTransform as TransformGroup;
+            if (g == null) return null;
+            foreach (Transform x in g.Children) { TranslateTransform tt = x as TranslateTransform; if (tt != null) return tt; }
+            return null;
+        }
+
+        static void ShiftTo(UIElement el, double x, double y, int ms)
+        {
+            TranslateTransform tt = ShiftOf(el);
+            if (tt == null) return;
+            if (ms <= 0)
+            {
+                tt.BeginAnimation(TranslateTransform.XProperty, null);
+                tt.BeginAnimation(TranslateTransform.YProperty, null);
+                tt.X = x;
+                tt.Y = y;
+                return;
+            }
+            IEasingFunction ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            tt.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(x, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease });
+            tt.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(y, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease });
+        }
+
+        static void Fade(UIElement el, double to, int ms)
+        {
+            el.BeginAnimation(UIElement.OpacityProperty,
+                new DoubleAnimation(to, TimeSpan.FromMilliseconds(ms)) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut } });
+        }
+
+        static Image IconImageOf(Border tile)
         {
             StackPanel sp = tile.Child as StackPanel;
             if (sp == null || sp.Children.Count == 0) return null;
-            Image im = sp.Children[0] as Image;
+            return sp.Children[0] as Image;
+        }
+
+        static ImageSource IconOfTile(Border tile)
+        {
+            Image im = IconImageOf(tile);
             return im != null ? im.Source : null;
+        }
+
+        double Dpi()
+        {
+            PresentationSource ps = PresentationSource.FromVisual(this);
+            return ps != null ? ps.CompositionTarget.TransformToDevice.M11 : 1;
         }
 
         Border MakeGhost(Border tile)
@@ -3912,43 +4132,34 @@ namespace SlideDock
             ScaleTransform st = new ScaleTransform(0.8, 0.8);
             g.RenderTransformOrigin = new Point(0.5, 0.5);
             g.RenderTransform = st;
-            DoubleAnimation pop = new DoubleAnimation(1.1, TimeSpan.FromMilliseconds(140));
-            pop.EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.4 };
+            DoubleAnimation pop = new DoubleAnimation(1.1, TimeSpan.FromMilliseconds(160));
+            pop.EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.5 };
             st.BeginAnimation(ScaleTransform.ScaleXProperty, pop);
             st.BeginAnimation(ScaleTransform.ScaleYProperty, pop);
             return g;
         }
 
-        void MakeHighlightWin(Border tile)
+        // catat slot semua tile sebelum ada yang bergeser
+        bool BeginReorder()
         {
-            double w = tile.ActualWidth > 0 ? tile.ActualWidth : 92, h = tile.ActualHeight > 0 ? tile.ActualHeight : 88;
-            Border box = new Border();
-            box.Width = w;
-            box.Height = h;
-            box.CornerRadius = new CornerRadius(14);
-            box.Background = new SolidColorBrush(Color.FromArgb(0x40, 0x60, 0xCD, 0xFF));
-            box.BorderBrush = new SolidColorBrush(Color.FromArgb(0xA0, 0x60, 0xCD, 0xFF));
-            box.BorderThickness = new Thickness(1.5);
-            box.IsHitTestVisible = false;
-            hlScale = new ScaleTransform(1, 1);
-            box.RenderTransformOrigin = new Point(0.5, 0.5);
-            box.RenderTransform = hlScale;
-            hlWin = new GhostWin(box, w + 12, h + 12);
-            hlWin.Left = -30000;
-            hlWin.Top = -30000;
-            hlWin.Show();                    // dibuat sebelum ghost: ghost tetap di atasnya
-        }
-
-        void Highlight(Border b)
-        {
-            if (hlWin == null) return;
-            IntPtr hw = new WindowInteropHelper(hlWin).Handle;
-            if (b == null) { Native.SetWindowPos(hw, IntPtr.Zero, -30000, -30000, 0, 0, 0x0001 | 0x0004 | 0x0010); return; }
-            // satu kali pindah (tanpa animasi) dalam piksel layar: tidak ada frame tambahan yang bersaing dengan ikon yang diseret
-            Point sp = b.PointToScreen(new Point(0, 0));
-            PresentationSource ps = PresentationSource.FromVisual(this);
-            double k = ps != null ? ps.CompositionTarget.TransformToDevice.M11 : 1;
-            Native.SetWindowPos(hw, IntPtr.Zero, (int)Math.Round(sp.X - 6 * k), (int)Math.Round(sp.Y - 6 * k), 0, 0, 0x0001 | 0x0004 | 0x0010);
+            reTiles = new List<Border>();
+            reSlots = new List<Rect>();
+            foreach (UIElement c in grid.Children)
+            {
+                Border b = c as Border;
+                if (b == null || !(b.Tag is string)) continue;
+                ShiftTo(b, 0, 0, 0);
+                Vector o = VisualTreeHelper.GetOffset(b);
+                reTiles.Add(b);
+                reSlots.Add(new Rect(new Point(o.X, o.Y), b.RenderSize));
+            }
+            reFrom = reTo = reTiles.IndexOf(dragSrc);
+            if (reFrom < 0) { reTiles = null; reSlots = null; return false; }
+            Image im = IconImageOf(dragSrc);
+            iconOff = im != null && im.ActualWidth > 0
+                ? (Vector)im.TranslatePoint(new Point(im.ActualWidth / 2, im.ActualHeight / 2), dragSrc)
+                : new Vector(dragSrc.ActualWidth / 2, 34);
+            return true;
         }
 
         void DragUpdate(MouseEventArgs e)
@@ -3959,87 +4170,238 @@ namespace SlideDock
             if (!dragging)
             {
                 if (Math.Abs(p.X - downPt.X) < 6 && Math.Abs(p.Y - downPt.Y) < 6) return;
+                if (!BeginReorder()) { pressed = false; return; }
                 dragging = true;         // tandai dulu: CaptureMouse bisa memicu event gerak lagi
                 CaptureMouse();
-                dragSrc.Opacity = 0.25;
-                MakeHighlightWin(dragSrc);
+                CancelPress();
+                dragSrc.Background = Brushes.Transparent;
+                Fade(dragSrc, 0.25, 140);   // tile asal jadi bayangan tipis yang menandai tempat mendarat
                 ghost = MakeGhost(dragSrc);
                 ghostWin = new GhostWin(ghost);
                 Point w0 = e.GetPosition(this);
                 ghostWin.Left = Left + w0.X - 42;
                 ghostWin.Top = Top + w0.Y - 42;
                 ghostWin.Show();
+                scrollTimer.Start();
             }
-            if (ghost == null || ghostWin == null) return;
-            // geser ghost dengan satu panggilan (x & y sekaligus, piksel layar) agar tidak ada langkah setengah-jalan
-            Point sp = PointToScreen(e.GetPosition(this));
-            PresentationSource ps = PresentationSource.FromVisual(this);
-            double k = ps != null ? ps.CompositionTarget.TransformToDevice.M11 : 1;
-            IntPtr gh = new WindowInteropHelper(ghostWin).Handle;
+            if (ghostWin == null) return;
+            MoveGhost(PointToScreen(e.GetPosition(this)));
+            UpdateTarget(e.GetPosition(grid));
+        }
+
+        // geser ghost dengan satu panggilan (x & y sekaligus, piksel layar) agar tidak ada langkah setengah-jalan
+        void MoveGhost(Point screen)
+        {
+            double k = Dpi();
+            ghostPx = new Point(Math.Round(screen.X - 42 * k), Math.Round(screen.Y - 42 * k));
+            IntPtr gh = ghostWin != null ? new WindowInteropHelper(ghostWin).Handle : IntPtr.Zero;
             if (gh != IntPtr.Zero)
-                Native.SetWindowPos(gh, IntPtr.Zero, (int)Math.Round(sp.X - 42 * k), (int)Math.Round(sp.Y - 42 * k), 0, 0, 0x0001 | 0x0004 | 0x0010);
-            Border over = null;
-            foreach (UIElement c in grid.Children)
+                Native.SetWindowPos(gh, IntPtr.Zero, (int)ghostPx.X, (int)ghostPx.Y, 0, 0, 0x0001 | 0x0004 | 0x0010);
+        }
+
+        // slot tujuan dari posisi kursor (koordinat grid): pilih baris dulu, lalu kolom terdekat di baris itu.
+        // Kursor jauh di luar daftar = kembali ke posisi asal.
+        void UpdateTarget(Point p)
+        {
+            if (reSlots == null || reSlots.Count == 0) return;
+            Rect area = reSlots[0];
+            foreach (Rect r in reSlots) area.Union(r);
+            area.Inflate(40, 40);
+            int to = reFrom;
+            if (area.Contains(p))
             {
-                Border b = c as Border;
-                if (b == null || !(b.Tag is string) || b == dragSrc) continue;
-                Point tl = b.TranslatePoint(new Point(0, 0), dragLayer);
-                if (new Rect(tl, b.RenderSize).Contains(p)) { over = b; break; }
+                double rowTop = reSlots[0].Top, bestDy = double.MaxValue;
+                foreach (Rect r in reSlots)
+                {
+                    double dy = Math.Max(0, Math.Max(r.Top - p.Y, p.Y - r.Bottom));
+                    if (dy < bestDy - 0.5) { bestDy = dy; rowTop = r.Top; }
+                }
+                double bestDx = double.MaxValue;
+                for (int i = 0; i < reSlots.Count; i++)
+                {
+                    Rect r = reSlots[i];
+                    if (Math.Abs(r.Top - rowTop) > 1) continue;
+                    double dx = Math.Max(0, Math.Max(r.Left - p.X, p.X - r.Right));
+                    if (dx < bestDx) { bestDx = dx; to = i; }
+                }
             }
-            if (over != hoverTile)
+            if (to == reTo) return;
+            reTo = to;
+            for (int i = 0; i < reTiles.Count; i++)
             {
-                hoverTile = over;
-                Highlight(hoverTile);
+                int n = SlotOf(i);
+                ShiftTo(reTiles[i], reSlots[n].X - reSlots[i].X, reSlots[n].Y - reSlots[i].Y, 230);
             }
+        }
+
+        // slot baru tile ke-i bila tile reFrom disisipkan di reTo
+        int SlotOf(int i)
+        {
+            if (i == reFrom) return reTo;
+            if (reFrom < reTo && i > reFrom && i <= reTo) return i - 1;
+            if (reTo < reFrom && i >= reTo && i < reFrom) return i + 1;
+            return i;
+        }
+
+        // kursor di dekat tepi atas/bawah daftar: daftar ikut bergulir (makin dekat tepi makin cepat)
+        void AutoScroll()
+        {
+            if (!dragging) { scrollTimer.Stop(); return; }
+            Point p = Mouse.GetPosition(sv);
+            if (p.X < -40 || p.X > sv.ActualWidth + 40 || p.Y < -60 || p.Y > sv.ActualHeight + 60) return;
+            const double edge = 40, max = 14;
+            double v = 0;
+            if (p.Y < edge) v = -Math.Min(1, (edge - p.Y) / edge) * max;
+            else if (p.Y > sv.ActualHeight - edge) v = Math.Min(1, (p.Y - (sv.ActualHeight - edge)) / edge) * max;
+            if (v == 0) return;
+            double before = sv.VerticalOffset;
+            sv.ScrollToVerticalOffset(before + v);
+            sv.UpdateLayout();
+            if (sv.VerticalOffset != before) UpdateTarget(Mouse.GetPosition(grid));
         }
 
         bool DragEnd()
         {
             pressed = false;
             if (!dragging) return false;
-            Border src = dragSrc, dst = hoverTile;
             ending = true;
             ReleaseMouseCapture();
             ending = false;
-            ResetDrag();
-            if (src != null && dst != null) AnimateSwap(src, dst);
+            scrollTimer.Stop();
+            dragging = false;
+            DropTile();
             return true;
         }
 
-        void ResetDrag()
+        // lepas: urutan langsung disimpan, ghost terbang & mengecil ke slot tujuan, lalu "mendarat" jadi ikon tile
+        void DropTile()
         {
-            dragLayer.Children.Clear();
-            if (ghostWin != null) { ghostWin.Close(); ghostWin = null; }
-            if (hlWin != null) { hlWin.Close(); hlWin = null; }
-            ghost = null;
-            if (dragSrc != null) dragSrc.Opacity = 1;
-            dragging = false;
+            Border src = dragSrc;
+            List<Border> tiles = reTiles;
+            int from = reFrom, to = reTo;
             dragSrc = null;
-            hoverTile = null;
+            reTiles = null;
+            if (src == null || tiles == null || ghostWin == null) { CloseGhost(); return; }
+            if (to != from)
+            {
+                List<Border> order = new List<Border>(tiles);
+                order.RemoveAt(from);
+                order.Insert(to, src);
+                try { StartStore.Reorder(order.Select(b => (string)b.Tag).ToList()); } catch { }
+            }
+            Point dest = grid.PointToScreen(reSlots[to].TopLeft + iconOff);
+            reSlots = null;
+            settling = true;
+            const double landScale = 1.06;            // tile mendarat sedikit besar lalu kembali (terasa "jatuh di tempat")
+            flightDone = delegate { Land(src, tiles, from, to, landScale); };
+            FlyGhost(dest, 36.0 / 42 * landScale);
         }
 
-        void AnimateSwap(Border a, Border b)
+        void FlyGhost(Point dest, double endScale)
         {
-            Point pa = a.TranslatePoint(new Point(0, 0), dragLayer);
-            Point pb = b.TranslatePoint(new Point(0, 0), dragLayer);
-            TranslateTransform ta = new TranslateTransform();
-            TranslateTransform tb = new TranslateTransform();
-            a.RenderTransform = ta;
-            b.RenderTransform = tb;
-            Panel.SetZIndex(a, 10);
-            Duration d = TimeSpan.FromMilliseconds(240);
-            IEasingFunction ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
-            DoubleAnimation ax = new DoubleAnimation(0, pb.X - pa.X, d) { EasingFunction = ease };
-            DoubleAnimation ay = new DoubleAnimation(0, pb.Y - pa.Y, d) { EasingFunction = ease };
-            DoubleAnimation bx = new DoubleAnimation(0, pa.X - pb.X, d) { EasingFunction = ease };
-            DoubleAnimation by = new DoubleAnimation(0, pa.Y - pb.Y, d) { EasingFunction = ease };
-            string sa = (string)a.Tag, sb = (string)b.Tag;
-            ax.Completed += delegate { StartStore.Swap(sa, sb); Rebuild(); };
-            ta.BeginAnimation(TranslateTransform.XProperty, ax);
-            ta.BeginAnimation(TranslateTransform.YProperty, ay);
-            tb.BeginAnimation(TranslateTransform.XProperty, bx);
-            tb.BeginAnimation(TranslateTransform.YProperty, by);
+            double k = Dpi();
+            Point a = ghostPx, b = new Point(Math.Round(dest.X - 42 * k), Math.Round(dest.Y - 42 * k));
+            double dist = Math.Sqrt((b.X - a.X) * (b.X - a.X) + (b.Y - a.Y) * (b.Y - a.Y)) / k;
+            double dur = Math.Max(150, Math.Min(260, 140 + dist * 0.5));
+            TimeSpan ts = TimeSpan.FromMilliseconds(dur);
+            IEasingFunction ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            if (ghost != null)
+            {
+                ScaleTransform st = ghost.RenderTransform as ScaleTransform;
+                if (st != null)
+                {
+                    DoubleAnimation sa = new DoubleAnimation(endScale, ts) { EasingFunction = ease };
+                    st.BeginAnimation(ScaleTransform.ScaleXProperty, sa);
+                    st.BeginAnimation(ScaleTransform.ScaleYProperty, sa);
+                }
+                // kotak kaca & bayangan memudar: yang tersisa hanya ikonnya, persis seperti di tile
+                foreach (Brush br in new Brush[] { ghost.Background, ghost.BorderBrush })
+                    if (br != null && !br.IsFrozen) br.BeginAnimation(Brush.OpacityProperty, new DoubleAnimation(0, ts) { EasingFunction = ease });
+                DropShadowEffect fx = ghost.Effect as DropShadowEffect;
+                if (fx != null) fx.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(0, ts) { EasingFunction = ease });
+            }
+            IntPtr gh = ghostWin != null ? new WindowInteropHelper(ghostWin).Handle : IntPtr.Zero;
+            Stopwatch sw = Stopwatch.StartNew();
+            flight = delegate
+            {
+                double t = Math.Min(1, sw.Elapsed.TotalMilliseconds / dur);
+                double e = 1 - Math.Pow(1 - t, 3);
+                if (gh != IntPtr.Zero)
+                    Native.SetWindowPos(gh, IntPtr.Zero, (int)Math.Round(a.X + (b.X - a.X) * e), (int)Math.Round(a.Y + (b.Y - a.Y) * e), 0, 0, 0x0001 | 0x0004 | 0x0010);
+                if (t >= 1) EndFlight();
+            };
+            CompositionTarget.Rendering += flight;
         }
+
+        void EndFlight()
+        {
+            if (flight != null) { CompositionTarget.Rendering -= flight; flight = null; }
+            Action d = flightDone;
+            flightDone = null;
+            if (d != null) d();
+            else CloseGhost();
+            settling = false;
+        }
+
+        // susun anak grid sesuai urutan baru & hapus semua geseran dalam satu langkah: posisi tampak tidak berubah
+        void Land(Border src, List<Border> tiles, int from, int to, double landScale)
+        {
+            if (grid.Children.Contains(src))
+            {
+                if (to != from)
+                {
+                    int ci = grid.Children.IndexOf(tiles[to]);
+                    grid.Children.Remove(src);
+                    grid.Children.Insert(ci, src);
+                }
+                foreach (Border b in tiles) ShiftTo(b, 0, 0, 0);
+                src.BeginAnimation(UIElement.OpacityProperty, null);
+                src.Opacity = 1;
+                ScaleTransform sc = UI.PressScale(src);
+                if (sc != null)
+                {
+                    sc.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+                    sc.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                    sc.ScaleX = sc.ScaleY = landScale;
+                }
+                // ghost (sama persis dengan ikon tile) ditutup setelah tile tergambar: tidak ada kedipan
+                DispatcherTimer t = new DispatcherTimer();
+                t.Interval = TimeSpan.FromMilliseconds(30);
+                t.Tick += delegate
+                {
+                    t.Stop();
+                    CloseGhost();
+                    if (sc != null)
+                    {
+                        DoubleAnimation back = new DoubleAnimation(1, TimeSpan.FromMilliseconds(240)) { EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.5 } };
+                        sc.BeginAnimation(ScaleTransform.ScaleXProperty, back);
+                        sc.BeginAnimation(ScaleTransform.ScaleYProperty, back);
+                    }
+                };
+                t.Start();
+            }
+            else CloseGhost();            // panel sudah dibangun ulang: urutan baru sudah tersimpan
+        }
+
+        void CloseGhost()
+        {
+            if (ghostWin != null) { ghostWin.Close(); ghostWin = null; }
+            ghost = null;
+        }
+
+        // seret dibatalkan (mis. jendela kehilangan fokus): semua ikon kembali ke tempat asalnya
+        void ResetDrag()
+        {
+            scrollTimer.Stop();
+            CloseGhost();
+            if (reTiles != null) foreach (Border b in reTiles) ShiftTo(b, 0, 0, 200);
+            if (dragSrc != null) Fade(dragSrc, 1, 160);
+            dragging = false;
+            dragSrc = null;
+            reTiles = null;
+            reSlots = null;
+        }
+
         Border RecycleTile()
         {
             Border t = Tiles.App("Recycle Bin", Icons.RecycleBin(), delegate { HidePanel(); Launcher.Open("shell:RecycleBinFolder"); });
@@ -5963,13 +6325,165 @@ namespace SlideDock
         }
 
         // dock di kiri/kanan: tampilan volume & baterai dibuat tegak (slider vertikal, isi ditumpuk)
-        bool builtV;
+        bool builtV, builtSimple;
 
         void BuildSideViews()
         {
             builtV = Layout.V;
+            builtSimple = Prefs.SimplePanels;
             BuildSoundView();
             BuildBatteryView();
+        }
+
+        // ----- gaya Simple: tautan jadi tombol ikon (nama muncul sebagai tooltip), tanpa baris bawah -----
+        const string GlyphSettings = "", GlyphQuick = "", GlyphSaver = "", GlyphPower = "";
+
+        static Border IconLink(string glyph, string tip, Action click)
+        {
+            Border b = new Border();
+            b.Width = 32;
+            b.Height = 30;
+            b.Margin = new Thickness(2, 0, 0, 0);
+            b.CornerRadius = new CornerRadius(8);
+            b.Background = Brushes.Transparent;
+            b.Cursor = Cursors.Hand;
+            b.ToolTip = tip;
+            UI.Hover(b, 0x30);
+            b.Child = UI.Glyph(glyph, 14);
+            b.MouseLeftButtonUp += delegate { click(); };
+            return b;
+        }
+
+        Border OpenLink(string glyph, string tip, string uri)
+        {
+            return IconLink(glyph, tip, delegate { HidePanel(); Launcher.Open(uri); });
+        }
+
+        Border QuickLink()
+        {
+            return IconLink(GlyphQuick, "Quick Settings", delegate { SwitchMode("all"); });
+        }
+
+        static StackPanel IconRow(params Border[] buttons)
+        {
+            StackPanel r = new StackPanel();
+            r.Orientation = Orientation.Horizontal;
+            foreach (Border b in buttons) r.Children.Add(b);
+            return r;
+        }
+
+        void BuildSoundSimple()
+        {
+            if (Layout.V)
+            {
+                soundView.Width = 96;
+                TextBlock h = Heading("Volume");
+                h.Margin = new Thickness(0);
+                h.HorizontalAlignment = HorizontalAlignment.Center;
+                soundView.Children.Add(h);
+                volPct.HorizontalAlignment = HorizontalAlignment.Center;
+                volPct.Margin = new Thickness(0, 2, 0, 12);
+                soundView.Children.Add(volPct);
+                volume2.Height = 180;
+                volume2.HorizontalAlignment = HorizontalAlignment.Center;
+                soundView.Children.Add(volume2);
+                volIcon2.Margin = new Thickness(0, 12, 0, 0);
+                volIcon2.HorizontalAlignment = HorizontalAlignment.Center;
+                soundView.Children.Add(volIcon2);
+                StackPanel links = IconRow(OpenLink(GlyphSettings, "Sound settings", "ms-settings:sound"), QuickLink());
+                links.HorizontalAlignment = HorizontalAlignment.Center;
+                links.Margin = new Thickness(-2, 12, 0, 0);
+                soundView.Children.Add(links);
+                return;
+            }
+            // satu baris judul: Volume · persen · [ikon pengaturan suara] [ikon Quick Settings], lalu slider
+            soundView.Width = 264;
+            soundView.Margin = new Thickness(16, 12, 12, 14);
+            Grid head = new Grid();
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            head.Children.Add(Heading("Volume"));
+            volPct.HorizontalAlignment = HorizontalAlignment.Right;
+            volPct.Margin = new Thickness(0, 0, 6, 0);
+            Grid.SetColumn(volPct, 1);
+            head.Children.Add(volPct);
+            StackPanel links2 = IconRow(OpenLink(GlyphSettings, "Sound settings", "ms-settings:sound"), QuickLink());
+            Grid.SetColumn(links2, 2);
+            head.Children.Add(links2);
+            soundView.Children.Add(head);
+            volIcon2.Margin = new Thickness(0);
+            volIcon2.HorizontalAlignment = HorizontalAlignment.Center;
+            FrameworkElement row = SliderRow(volIcon2, volume2);
+            row.Margin = new Thickness(0, 8, 4, 0);
+            soundView.Children.Add(row);
+        }
+
+        Border[] BatteryLinks()
+        {
+            return new Border[] {
+                OpenLink(GlyphSaver, "Energy saver", "ms-settings:batterysaver"),
+                OpenLink(GlyphPower, "Power & battery", "ms-settings:powersleep"),
+                QuickLink() };
+        }
+
+        void BuildBatterySimple()
+        {
+            if (Layout.V)
+            {
+                batteryView.Width = 120;
+                bigRing.Margin = new Thickness(0, 4, 0, 10);
+                bigRing.HorizontalAlignment = HorizontalAlignment.Center;
+                batteryView.Children.Add(bigRing);
+                batTitle.HorizontalAlignment = HorizontalAlignment.Center;
+                batteryView.Children.Add(batTitle);
+                batSub.HorizontalAlignment = HorizontalAlignment.Center;
+                batSub.TextAlignment = TextAlignment.Center;
+                batteryView.Children.Add(batSub);
+                StackPanel br = new StackPanel();
+                br.Margin = new Thickness(0, 16, 0, 0);
+                bright2.Height = 140;
+                bright2.HorizontalAlignment = HorizontalAlignment.Center;
+                br.Children.Add(bright2);
+                TextBlock sun = UI.Glyph("", 16);
+                sun.Margin = new Thickness(0, 10, 0, 0);
+                br.Children.Add(sun);
+                brightRow2 = br;
+                batteryView.Children.Add(br);
+                StackPanel links = IconRow(BatteryLinks());
+                links.HorizontalAlignment = HorizontalAlignment.Center;
+                links.Margin = new Thickness(-2, 12, 0, 0);
+                batteryView.Children.Add(links);
+                return;
+            }
+            // cincin · persen & sisa waktu · [ikon] [ikon] [ikon], lalu slider kecerahan
+            batteryView.Width = 296;
+            batteryView.Margin = new Thickness(16, 14, 12, 14);
+            Grid top = new Grid();
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            bigRing.Margin = new Thickness(4, 0, 14, 0);
+            bigRing.HorizontalAlignment = HorizontalAlignment.Left;
+            top.Children.Add(bigRing);
+            StackPanel txt = new StackPanel();
+            txt.VerticalAlignment = VerticalAlignment.Center;
+            batTitle.HorizontalAlignment = HorizontalAlignment.Left;
+            txt.Children.Add(batTitle);
+            batSub.HorizontalAlignment = HorizontalAlignment.Left;
+            batSub.TextAlignment = TextAlignment.Left;
+            txt.Children.Add(batSub);
+            Grid.SetColumn(txt, 1);
+            top.Children.Add(txt);
+            StackPanel links2 = IconRow(BatteryLinks());
+            links2.VerticalAlignment = VerticalAlignment.Top;
+            links2.Margin = new Thickness(6, 0, 0, 0);
+            Grid.SetColumn(links2, 2);
+            top.Children.Add(links2);
+            batteryView.Children.Add(top);
+            brightRow2 = SliderRow(UI.Glyph("", 16), bright2);
+            brightRow2.Margin = new Thickness(0, 12, 4, 0);
+            batteryView.Children.Add(brightRow2);
         }
 
         void BuildSoundView()
@@ -5984,6 +6498,7 @@ namespace SlideDock
             volPct.FontFamily = UI.Text;
             volPct.VerticalAlignment = VerticalAlignment.Center;
             soundView.Margin = new Thickness(16, 16, 16, 10);
+            if (Prefs.SimplePanels) { BuildSoundSimple(); return; }
             if (Layout.V)
             {
                 soundView.Width = 140;
@@ -6037,6 +6552,7 @@ namespace SlideDock
             batSub.FontSize = 12;
             batSub.FontFamily = UI.Text;
             batSub.TextWrapping = TextWrapping.Wrap;
+            if (Prefs.SimplePanels) { BuildBatterySimple(); return; }
             if (Layout.V)
             {
                 batteryView.Width = 150;
@@ -6103,7 +6619,7 @@ namespace SlideDock
         void SwitchMode(string m)
         {
             Mode = m;
-            if (builtV != Layout.V) BuildSideViews();
+            if (builtV != Layout.V || builtSimple != Prefs.SimplePanels) BuildSideViews();
             wifiArea.Child = null;
             wifiHost.Child = null;
             if (m == "wifi") wifiHost.Child = wifiPanel;
@@ -7990,13 +8506,15 @@ namespace SlideDock
             get
             {
                 if (fullCard == null || fullCard.ActualHeight <= 0) return Top + ActualHeight - 70;
-                return Top + fullCard.TranslatePoint(new Point(0, 0), this).Y;
+                return Top + fullCard.TranslatePoint(new Point(0, 0), this).Y - hideShift.Y;   // Auto-hide: posisi saat dock tampil
             }
         }
         public Func<bool> AnyPopupOpen;
         public Action OnPopup;
         public void HidePreview() { previewTimer.Stop(); preview.HidePreview(); }
-        const bool ReserveSpace = false;   // false = app terbuka penuh layar, dock melayang di atasnya
+        // bagian dock yang bisa disembunyikan lewat Dock settings
+        FrameworkElement startTile, searchTile, sepLeft, sepRight, binTile;
+        readonly TranslateTransform hideShift = new TranslateTransform();   // mode Auto-hide: geser keluar layar
         Border fullCard;
         Border notch;
         readonly Image notchIcon = new Image();
@@ -8056,17 +8574,24 @@ namespace SlideDock
             row.Orientation = Layout.V ? Orientation.Vertical : Orientation.Horizontal;
             row.Margin = Layout.V ? new Thickness(6, 8, 6, 8) : new Thickness(8, 6, 8, 6);
 
-            row.Children.Add(MakeStart());
-            row.Children.Add(GlyphTile("\uE721", 18, "Search apps, files, or the web", delegate { if (OnSearch != null) OnSearch(); }));
-            row.Children.Add(MakeSep());
+            startTile = MakeStart();
+            row.Children.Add(startTile);
+            searchTile = GlyphTile("\uE721", 18, "Search apps, files, or the web", delegate { if (OnSearch != null) OnSearch(); });
+            row.Children.Add(searchTile);
+            sepLeft = MakeSep();
+            row.Children.Add(sepLeft);
             itemsPanel.Orientation = Layout.V ? Orientation.Vertical : Orientation.Horizontal;
             itemsPanel.Background = Brushes.Transparent;
             itemsPanel.MouseMove += delegate(object s, MouseEventArgs e) { Magnify(Layout.V ? e.GetPosition(itemsPanel).Y : e.GetPosition(itemsPanel).X); };
             itemsPanel.MouseLeave += delegate { Magnify(double.NaN); };
             row.Children.Add(itemsPanel);
-            row.Children.Add(MakeSep());
+            sepRight = MakeSep();
+            row.Children.Add(sepRight);
+            binTile = MakeBin();
+            row.Children.Add(binTile);
             row.Children.Add(MakeStatus());
             row.Children.Add(MakeClock());
+            ApplyContents();
 
             card.Child = row;
             fullCard = card;
@@ -8086,16 +8611,21 @@ namespace SlideDock
             rootGrid.Children.Add(morphLayer);
             rootGrid.Children.Add(card);
             rootGrid.Children.Add(notch);
-            Content = rootGrid;
+            // pembungkus tanpa skala: dipakai untuk menggeser seluruh dock keluar layar (mode Auto-hide)
+            Grid host = new Grid();
+            host.RenderTransform = hideShift;
+            host.Children.Add(rootGrid);
+            Content = host;
             ApplySize();
             SetupDrag(card, false);
             SetupDrag(notch, true);
             PreviewMouseMove += delegate(object s, MouseEventArgs e) { DragMove(e); };
             notch.SizeChanged += delegate { if (!dragging) SetSlide(slideCur); };
-            card.SizeChanged += delegate { if (!dragging) ApplySlide(false); };
+            card.SizeChanged += delegate { if (!dragging) ApplySlide(false); Dispatcher.BeginInvoke(new Action(UpdateAppBar), DispatcherPriority.Loaded); };
             SizeChanged += delegate { if (!dragging) ApplySlide(false); };
             LoadTheme();
             StyleSurfaces();
+            StyleStartIcon();
             // cek posisi kursor tiap 150 ms: dekat dock = buka penuh, menjauh 0,7 detik = kembali ke notch
             previewTimer.Interval = TimeSpan.FromMilliseconds(380);
             previewTimer.Tick += delegate { ShowPreview(); };
@@ -8134,7 +8664,7 @@ namespace SlideDock
             };
 
             SourceInitialized += OnSourceInit;
-            ContentRendered += delegate { SetupAppBar(); };
+            ContentRendered += delegate { SetupAppBar(); ApplyMode(); };
             SizeChanged += delegate { Reposition(); };
             DpiChanged += delegate { Dispatcher.BeginInvoke(new Action(Reposition), DispatcherPriority.Background); };
             Closed += delegate { RemoveAppBar(); };
@@ -8167,6 +8697,123 @@ namespace SlideDock
             DockScale = ScaleFor(Prefs.DockSize, ScreenDip);
             rootGrid.LayoutTransform = Math.Abs(DockScale - 1) < 0.001 ? Transform.Identity : new ScaleTransform(DockScale, DockScale);
             Dispatcher.BeginInvoke(new Action(delegate { ApplySlide(false); }), DispatcherPriority.Loaded);
+        }
+
+        // ----- pilihan dari Dock settings: dipanggil saat pengaturan berubah -----
+        public void ApplyPrefs()
+        {
+            ApplyContents();
+            ApplyMode();
+            UpdateClock();
+            ForceRefresh();                 // ikon app dibangun ulang (filter app, penanda app terbuka)
+        }
+
+        static void Vis(UIElement e, bool on) { if (e != null) e.Visibility = on ? Visibility.Visible : Visibility.Collapsed; }
+
+        static bool HasBattery()
+        {
+            WF.PowerStatus ps = WF.SystemInformation.PowerStatus;
+            return (ps.BatteryChargeStatus & WF.BatteryChargeStatus.NoSystemBattery) == 0 && ps.BatteryLifePercent <= 1.0f;
+        }
+
+        // bagian dock yang tampil (Start, Search, Recycle Bin, Wi-Fi, Volume, Battery, jam) + garis pemisahnya
+        public void ApplyContents()
+        {
+            bool st = Prefs.Shows("start"), se = Prefs.Shows("search"), bin = Prefs.Shows("bin");
+            bool wifi = Prefs.Shows("wifi"), vol = Prefs.Shows("volume"), clk = Prefs.Shows("clock");
+            bool bat = Prefs.Shows("battery") && HasBattery();
+            Vis(startTile, st);
+            Vis(searchTile, se);
+            Vis(sepLeft, st || se);
+            Vis(binTile, bin);
+            Vis(netTile, wifi);
+            Vis(volTile, vol);
+            Vis(batTile, bat);
+            Vis(statusTile, wifi || vol || bat);
+            Vis(clockTile, clk);
+            Vis(sepRight, bin || wifi || vol || bat || clk);
+            Vis(notchRing, bat);
+            Vis(notchSep, bat);
+            batRing.ShowNumber = Prefs.BatteryPct;
+            notchRing.ShowNumber = Prefs.BatteryPct;
+            Vis(clockDate, Prefs.ShowDate);
+        }
+
+        void UpdateClock()
+        {
+            DateTime now = DateTime.Now;
+            CultureInfo en = CultureInfo.InvariantCulture;
+            if (!Prefs.Clock12) clockTime.Text = now.ToString("HH:mm");
+            else clockTime.Text = Layout.V ? now.ToString("h:mm", en) : now.ToString("h:mm tt", en);
+            clockDate.Text = now.ToString(Layout.V ? "dd/MM" : "dd/MM/yyyy");
+        }
+
+        // ----- mode dock: Floating / Fixed (memesan ruang layar) / Auto-hide -----
+        bool autoHidden;
+        DateTime revealedAt = DateTime.MinValue;
+
+        public void ApplyMode()
+        {
+            int m = Prefs.DockMode;
+            if (m != 0 && compact) { EndPeek(false); SetCompact(false); }   // notch hanya di Floating
+            if (m == 1) { if (!appBarOn) SetupAppBarNow(); else UpdateAppBar(); }
+            else RemoveAppBar();
+            if (m != 2 && autoHidden) SetAutoHidden(false);
+        }
+
+        // jarak geser keluar layar: seluruh dock (termasuk bayangan) tidak terlihat
+        Vector HideOffset()
+        {
+            double w = ActualWidth > 0 ? ActualWidth : Width, h = ActualHeight > 0 ? ActualHeight : Height;
+            if (Layout.Side == 1) return new Vector(-w, 0);
+            if (Layout.Side == 2) return new Vector(w, 0);
+            return new Vector(0, h);
+        }
+
+        void SetAutoHidden(bool hide)
+        {
+            if (hide == autoHidden) return;
+            autoHidden = hide;
+            if (!hide) revealedAt = DateTime.Now;
+            Vector v = hide ? HideOffset() : new Vector(0, 0);
+            TimeSpan d = TimeSpan.FromMilliseconds(hide ? 220 : 260);
+            IEasingFunction ease = hide ? (IEasingFunction)new CubicEase { EasingMode = EasingMode.EaseIn }
+                                        : new CubicEase { EasingMode = EasingMode.EaseOut };
+            hideShift.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(v.X, d) { EasingFunction = ease });
+            hideShift.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(v.Y, d) { EasingFunction = ease });
+            if (hide) { HidePreview(); Magnify(double.NaN); }
+            collapseTimer.Interval = TimeSpan.FromMilliseconds(hide ? 80 : 150);   // tersembunyi: cek tepi layar lebih sering
+        }
+
+        // kursor menyentuh tepi layar tempat dock berada (di layar dock ini)
+        bool CursorAtEdge()
+        {
+            POINT p;
+            if (hwnd == IntPtr.Zero || !GetCursorPos(out p)) return false;
+            System.Drawing.Rectangle b;
+            try { b = WF.Screen.FromHandle(hwnd).Bounds; } catch { return false; }
+            if (p.X < b.Left || p.X >= b.Right || p.Y < b.Top || p.Y >= b.Bottom) return false;
+            if (Layout.Side == 1) return p.X <= b.Left + 1;
+            if (Layout.Side == 2) return p.X >= b.Right - 2;
+            return p.Y >= b.Bottom - 2;
+        }
+
+        // satu kali cek (dari HoverPoll) untuk mode Auto-hide. true = sudah ditangani.
+        bool AutoHidePoll(bool busy)
+        {
+            if (Prefs.DockMode != 2) return false;
+            if (compact) SetCompact(false);
+            if (busy || dragArmed || dragging || reOn || reSettling) { lastNear = DateTime.Now; SetAutoHidden(false); return true; }
+            if (autoHidden)
+            {
+                if (CursorAtEdge()) { lastNear = DateTime.Now; SetAutoHidden(false); }
+                return true;
+            }
+            if (CursorNear() || CursorAtEdge()) { lastNear = DateTime.Now; return true; }
+            // baru muncul: beri waktu kursor naik ke dock; setelah itu sembunyi 0,7 detik sesudah kursor pergi
+            if ((DateTime.Now - lastNear).TotalMilliseconds > 700 && (DateTime.Now - revealedAt).TotalMilliseconds > 900)
+                SetAutoHidden(true);
+            return true;
         }
 
         // ----- geser dock di sepanjang tepinya (bawah: kiri-kanan, kiri/kanan: atas-bawah) -----
@@ -8335,6 +8982,7 @@ namespace SlideDock
             Theme = th;
             try { Directory.CreateDirectory(Store.Dir); File.WriteAllText(ThemeFile, th); } catch { }
             StyleSurfaces();
+            StyleStartIcon();
             ApplyBlur();
         }
 
@@ -8699,6 +9347,11 @@ namespace SlideDock
         void HoverPoll()
         {
             if (hiddenForFullscreen) return;
+            if (Prefs.DockMode == 2)
+            {
+                AutoHidePoll(MenuOpen() || (AnyPopupOpen != null && AnyPopupOpen()) || preview.Showing);
+                return;
+            }
             if (dragArmed || dragging || reOn || reSettling) { lastNear = DateTime.Now; return; }
             bool menu = MenuOpen();
             bool popup = AnyPopupOpen != null && AnyPopupOpen();
@@ -8751,7 +9404,7 @@ namespace SlideDock
             }
             EndPeek(true);                                          // kursor pergi sebelum jeda habis: notch kembali
             peekHold = false;
-            if (!Prefs.Notch) SetCompact(false);                       // notch dimatikan: dock selalu penuh
+            if (!Prefs.NotchOn) SetCompact(false);                     // notch dimatikan / mode Fixed: dock selalu penuh
             else if ((DateTime.Now - lastNear).TotalMilliseconds > 700) SetCompact(true);
         }
 
@@ -8918,31 +9571,73 @@ namespace SlideDock
         readonly Border updateDot = new Border();
         public void SetUpdateDot(bool on) { updateDot.Visibility = on ? Visibility.Visible : Visibility.Collapsed; }
 
+        System.Windows.Shapes.Path startLogo;
+        TranslateTransform[] startSquares;
+
+        // d > 0: tiap kotak bergeser menjauhi pusat (merenggang), d < 0: mendekat (merapat)
+        void SpreadStart(double d, int ms, bool bounce)
+        {
+            if (startSquares == null) return;
+            IEasingFunction ease = bounce ? (IEasingFunction)new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.7 }
+                                          : new CubicEase { EasingMode = EasingMode.EaseOut };
+            for (int i = 0; i < 4; i++)
+            {
+                double sx = i % 2 == 0 ? -1 : 1, sy = i / 2 == 0 ? -1 : 1;
+                startSquares[i].BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(sx * d, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease });
+                startSquares[i].BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(sy * d, TimeSpan.FromMilliseconds(ms)) { EasingFunction = ease });
+            }
+        }
+
+        // warna logo Start mengikuti tema: biru terang bercahaya di kaca gelap / Dark,
+        // biru pekat (kontras tinggi) di Glass 2 yang putih
+        void StyleStartIcon()
+        {
+            if (startLogo == null) return;
+            bool light = Theme == "glass2";
+            Color a = light ? Color.FromRgb(0x1F, 0x8F, 0xFF) : Color.FromRgb(0x8F, 0xE3, 0xFF);
+            Color b = light ? Color.FromRgb(0x08, 0x4B, 0xD1) : Color.FromRgb(0x3B, 0x86, 0xFF);
+            LinearGradientBrush g = new LinearGradientBrush(a, b, new Point(0, 0), new Point(1, 1));
+            g.Freeze();
+            startLogo.Fill = g;
+            startLogo.Effect = light
+                ? new DropShadowEffect { BlurRadius = 4, ShadowDepth = 1, Direction = 270, Opacity = 0.22, Color = Color.FromRgb(0x08, 0x2A, 0x70) }
+                : new DropShadowEffect { BlurRadius = 9, ShadowDepth = 0, Opacity = 0.45, Color = b };
+            updateDot.Background = new SolidColorBrush(light ? Color.FromRgb(0xFF, 0x7A, 0x1A) : Color.FromRgb(0xFF, 0xA3, 0x3A));
+            updateDot.BorderBrush = new SolidColorBrush(light ? Color.FromRgb(0xF7, 0xF8, 0xFB) : Color.FromRgb(0x14, 0x14, 0x1C));
+        }
+
         FrameworkElement MakeStart()
         {
             Border t = NewTile();
-            UniformGrid g = new UniformGrid();
-            g.Rows = 2;
-            g.Columns = 2;
-            g.Width = 22;
-            g.Height = 22;
-            g.HorizontalAlignment = HorizontalAlignment.Center;
-            g.VerticalAlignment = VerticalAlignment.Center;
+            // logo Start: 4 kotak membulat dalam SATU bentuk, diisi satu gradien yang mengalir melintasi keempatnya
+            const double sq = 9.6, gapSq = 2.8, far = sq + gapSq;
+            GeometryGroup logo = new GeometryGroup();
+            startSquares = new TranslateTransform[4];
             for (int i = 0; i < 4; i++)
             {
-                Border d = new Border();
-                d.Margin = new Thickness(1);
-                d.CornerRadius = new CornerRadius(1.5);
-                d.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
-                g.Children.Add(d);
+                TranslateTransform tt = new TranslateTransform();
+                startSquares[i] = tt;
+                RectangleGeometry r = new RectangleGeometry(new Rect((i % 2) * far, (i / 2) * far, sq, sq), 2.8, 2.8);
+                r.Transform = tt;
+                logo.Children.Add(r);
             }
+            startLogo = new System.Windows.Shapes.Path();
+            startLogo.Data = logo;
+            startLogo.Width = 2 * sq + gapSq;
+            startLogo.Height = 2 * sq + gapSq;
+            startLogo.HorizontalAlignment = HorizontalAlignment.Center;
+            startLogo.VerticalAlignment = VerticalAlignment.Center;
+            startLogo.SnapsToDevicePixels = false;
+            // hover: kotak sedikit merenggang. tekan: merapat. lepas: kembali merenggang dengan pantulan kecil
+            t.MouseEnter += delegate { SpreadStart(0.9, 220, false); };
+            t.MouseLeave += delegate { SpreadStart(0, 260, false); };
+            t.PreviewMouseLeftButtonDown += delegate { SpreadStart(-0.8, 90, false); };
+            t.PreviewMouseLeftButtonUp += delegate { SpreadStart(t.IsMouseOver ? 0.9 : 0, 320, true); };
             Grid sg = new Grid();
-            sg.Children.Add(g);
+            sg.Children.Add(startLogo);
             updateDot.Width = 8;
             updateDot.Height = 8;
             updateDot.CornerRadius = new CornerRadius(4);
-            updateDot.Background = new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF));
-            updateDot.BorderBrush = new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x1C));
             updateDot.BorderThickness = new Thickness(1.5);
             updateDot.HorizontalAlignment = HorizontalAlignment.Right;
             updateDot.VerticalAlignment = VerticalAlignment.Top;
@@ -9062,7 +9757,7 @@ namespace SlideDock
         Point CenterOnScreen(FrameworkElement e)
         {
             Point p = e.TranslatePoint(new Point(e.ActualWidth / 2, e.ActualHeight / 2), this);
-            return new Point(Left + p.X, Top + p.Y);
+            return new Point(Left + p.X - hideShift.X, Top + p.Y - hideShift.Y);
         }
 
         public Point ClockCenter() { return CenterOnScreen(clockTile); }
@@ -9073,7 +9768,8 @@ namespace SlideDock
             if (fullCard == null || fullCard.ActualWidth <= 0) return Rect.Empty;
             Point a = fullCard.TranslatePoint(new Point(0, 0), this);
             Point b = fullCard.TranslatePoint(new Point(fullCard.ActualWidth, fullCard.ActualHeight), this);
-            return new Rect(new Point(Left + a.X, Top + a.Y), new Point(Left + b.X, Top + b.Y));
+            Vector h = new Vector(hideShift.X, hideShift.Y);
+            return new Rect(new Point(Left + a.X, Top + a.Y) - h, new Point(Left + b.X, Top + b.Y) - h);
         }
         Border trayTile;
         readonly PreviewWindow preview = new PreviewWindow();
@@ -9131,6 +9827,7 @@ namespace SlideDock
         void ShowPreview()
         {
             previewTimer.Stop();
+            if (!Prefs.Previews) return;                  // pratinjau jendela dimatikan di Dock settings
             DockItem it = pendingItem;
             FrameworkElement t = pendingTile;
             if (it == null || t == null || it.Wins.Count == 0 || !t.IsVisible) return;
@@ -9258,10 +9955,7 @@ namespace SlideDock
 
             WF.PowerStatus ps = WF.SystemInformation.PowerStatus;
             bool hasBat = (ps.BatteryChargeStatus & WF.BatteryChargeStatus.NoSystemBattery) == 0 && ps.BatteryLifePercent <= 1.0f;
-            Visibility bv = hasBat ? Visibility.Visible : Visibility.Collapsed;
-            batTile.Visibility = bv;
-            notchRing.Visibility = bv;
-            if (notchSep != null) notchSep.Visibility = bv;
+            ApplyContents();                                    // baterai tampil hanya bila ada & tidak disembunyikan
             if (hasBat)
             {
                 int pct = (int)Math.Round(ps.BatteryLifePercent * 100);
@@ -9339,12 +10033,15 @@ namespace SlideDock
             t.Tag = zoom;
             g.Children.Add(img);
 
-            if (it.Wins.Count > 0)
+            int ind = Prefs.Indicator;                         // 0 garis, 1 titik, 2 tidak ada
+            if (it.Wins.Count > 0 && ind != 2)
             {
+                // garis: app aktif bergaris panjang. titik: semua sama kecil, app aktif berwarna biru
+                double len = ind == 1 ? 5 : it.Active ? 16 : 5, thick = ind == 1 ? 5 : 3.5;
                 Border dot = new Border();
-                dot.Height = 3.5;
-                dot.Width = it.Active ? 16 : 5;
-                dot.CornerRadius = new CornerRadius(2);
+                dot.Height = thick;
+                dot.Width = len;
+                dot.CornerRadius = new CornerRadius(thick / 2);
                 dot.Background = it.Active ? (Brush)new SolidColorBrush(Color.FromRgb(0x60, 0xCD, 0xFF)) : UI.Ink(0xB0);
                 dot.VerticalAlignment = VerticalAlignment.Bottom;
                 dot.HorizontalAlignment = HorizontalAlignment.Center;
@@ -9352,8 +10049,8 @@ namespace SlideDock
                 if (Layout.V)
                 {
                     // titik penanda di sisi yang menempel ke tepi layar
-                    dot.Width = 3.5;
-                    dot.Height = it.Active ? 16 : 5;
+                    dot.Width = thick;
+                    dot.Height = len;
                     dot.VerticalAlignment = VerticalAlignment.Center;
                     dot.HorizontalAlignment = Layout.Side == 1 ? HorizontalAlignment.Left : HorizontalAlignment.Right;
                     dot.Margin = Layout.Side == 1 ? new Thickness(1, 0, 0, 0) : new Thickness(0, 0, 1, 0);
@@ -9364,6 +10061,7 @@ namespace SlideDock
             UI.Tip(t, it.Name);
             t.RenderTransform = new TranslateTransform();      // dipakai saat ikon pin diurutkan ulang
             t.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Activate(it); };
+            HookMiddleClick(t, it);
             if (it.Pinned)
             {
                 t.PreviewMouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { ReorderPress(t, e); };
@@ -9594,7 +10292,18 @@ namespace SlideDock
                 DockItem it = fe == null ? null : fe.DataContext as DockItem;
                 if (it != null) items.Add(it);
             }
-            try { PinStore.Reorder(items.Where(i => i.Pinned).Select(i => i.Lnk).ToList()); } catch { }
+            try
+            {
+                // pin yang sedang tidak tampil (mis. "Open only") tetap di posisinya: hanya slot pin yang tampil diisi ulang
+                List<string> vis = items.Where(i => i.Pinned).Select(i => i.Lnk).ToList();
+                HashSet<string> vs = new HashSet<string>(vis, StringComparer.OrdinalIgnoreCase);
+                List<string> merged = new List<string>();
+                int k = 0;
+                foreach (PinItem p in PinStore.Load())
+                    merged.Add(vs.Contains(p.Target) && k < vis.Count ? vis[k++] : p.Target);
+                PinStore.Reorder(merged);
+            }
+            catch { }
             signature = SigOf(items);                             // dock ini sudah sesuai; layar lain ikut di Tick
             Magnify(itemsPanel.IsMouseOver ? Along(Mouse.GetPosition(itemsPanel)) : double.NaN);
         }
@@ -9611,12 +10320,38 @@ namespace SlideDock
             IntPtr target;
             if (idx >= 0)
             {
-                if (it.Wins.Count == 1) { Native.ShowWindow(fg, 6); return; }
+                // app sudah di depan: minimize (seperti taskbar) atau biarkan, sesuai Dock settings
+                if (it.Wins.Count == 1) { if (Prefs.ClickOpen == 1) Native.ShowWindow(fg, 6); return; }
                 target = it.Wins[(idx + 1) % it.Wins.Count];
             }
             else target = it.Wins[0];
             if (Native.IsIconic(target)) Native.ShowWindow(target, 9);
             Native.SetForegroundWindow(target);
+        }
+
+        // klik tengah ikon app: buka jendela baru / tutup / tidak ada (Dock settings)
+        static void MiddleClick(DockItem it)
+        {
+            int m = Prefs.MiddleClick;
+            if (m == 1)
+            {
+                foreach (IntPtr w in it.Wins) Native.PostMessage(w, 0x10, IntPtr.Zero, IntPtr.Zero);   // WM_CLOSE
+                return;
+            }
+            if (m != 0) return;
+            string target = it.Lnk ?? (it.Aumid != null ? "shell:AppsFolder\\" + it.Aumid : it.Exe);
+            if (target != null) Launcher.Open(target);
+        }
+
+        static void HookMiddleClick(FrameworkElement el, DockItem it)
+        {
+            el.MouseDown += delegate(object s, MouseButtonEventArgs e) { if (e.ChangedButton == MouseButton.Middle) e.Handled = true; };
+            el.MouseUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (e.ChangedButton != MouseButton.Middle) return;
+                e.Handled = true;
+                MiddleClick(it);
+            };
         }
 
         static DockItem MatchPinByTitle(List<DockItem> list, string title)
@@ -9718,6 +10453,25 @@ namespace SlideDock
             return list;
         }
 
+        // app yang tampil di dock menurut Dock settings: dari layar mana, lalu pin / app terbuka
+        List<DockItem> FilterShown(List<DockItem> list)
+        {
+            if (Prefs.AppsFrom == 1)
+            {
+                IntPtr fg = Native.GetForegroundWindow();
+                foreach (DockItem it in list)
+                {
+                    it.Wins.RemoveAll(w => !OnMyScreen(w));
+                    it.Active = it.Wins.Contains(fg);
+                }
+                list = list.Where(i => i.Pinned || i.Wins.Count > 0).ToList();
+            }
+            int show = Prefs.ShowApps;
+            if (show == 1) list = list.Where(i => i.Pinned).ToList();
+            else if (show == 2) list = list.Where(i => i.Wins.Count > 0).ToList();
+            return list;
+        }
+
         static string SigOf(List<DockItem> list)
         {
             StringBuilder sb = new StringBuilder();
@@ -9738,6 +10492,7 @@ namespace SlideDock
                 if (k != activeKey) { activeKey = k; notchIcon.Source = IconOf(act); }
             }
             if (reOn || reSettling) return;              // ikon pin sedang diurutkan: dock jangan dibangun ulang
+            list = FilterShown(list);
             string sig = SigOf(list);
             if (sig == signature) return;
             signature = sig;
@@ -9818,6 +10573,7 @@ namespace SlideDock
                     Activate(target);
                     EndPeek(true);
                 };
+                HookMiddleClick(ng, it);
                 if (it.Active)
                 {
                     Border u = new Border();
@@ -9881,12 +10637,10 @@ namespace SlideDock
         void Tick()
         {
             tick++;
-            DateTime now = DateTime.Now;
-            clockTime.Text = now.ToString("HH:mm");
-            clockDate.Text = now.ToString(Layout.V ? "dd/MM" : "dd/MM/yyyy");
+            UpdateClock();
             TaskbarCtl.Enforce();
 
-            bool fs = IsFullscreenForeground();
+            bool fs = Prefs.HideFullscreen && IsFullscreenForeground();
             if (fs && !hiddenForFullscreen)
             {
                 hiddenForFullscreen = true;
@@ -9937,35 +10691,70 @@ namespace SlideDock
             return ps != null ? ps.CompositionTarget.TransformToDevice.M11 : 1.0;
         }
 
+        bool taskbarApplied;
+
         void SetupAppBar()
         {
-            if (hwnd == IntPtr.Zero || appBarOn) return;
+            if (hwnd == IntPtr.Zero || taskbarApplied) return;
+            taskbarApplied = true;
             TaskbarCtl.Apply();
-            if (!ReserveSpace) return;
+        }
+
+        // mode Fixed: dock didaftarkan sebagai "app bar" seperti taskbar Windows, sehingga Windows mengecilkan
+        // area kerja layar ini. Jendela yang di-maximize berhenti tepat di tepi dock dan tidak menimpanya.
+        void SetupAppBarNow()
+        {
+            if (hwnd == IntPtr.Zero || appBarOn) return;
             APPBARDATA d = new APPBARDATA();
             d.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
             d.hWnd = hwnd;
-            d.uCallbackMessage = Native.RegisterWindowMessage("SlideDock.AppBar");
-            Native.SHAppBarMessage(0, ref d);
+            appBarMsg = Native.RegisterWindowMessage("SlideDock.AppBar");
+            d.uCallbackMessage = appBarMsg;
+            Native.SHAppBarMessage(0, ref d);                     // ABM_NEW
             appBarOn = true;
-            Reposition();
+            lastBarThick = -1;
+            UpdateAppBar();
         }
+
+        uint appBarMsg;
+        int lastBarThick = -1, lastBarSide = -1;
+        RECT lastBarMon;
 
         void UpdateAppBar()
         {
-            if (!appBarOn) return;
-            double scale = Scale();
-            int screenW = (int)Math.Round(SystemParameters.PrimaryScreenWidth * scale);
-            int screenH = (int)Math.Round(SystemParameters.PrimaryScreenHeight * scale);
-            int top = (int)Math.Round((Top + CardMargin - 6) * scale);
+            if (!appBarOn || hwnd == IntPtr.Zero || fullCard == null || fullCard.ActualWidth <= 0) return;
+            MONINFO mi = new MONINFO();
+            mi.cbSize = Marshal.SizeOf(typeof(MONINFO));
+            if (!GetMonitorInfo(MonitorFromWindow(hwnd, 2), ref mi)) return;
+            RECT m = mi.rcMonitor;
+            Point a, b;
+            try
+            {
+                a = fullCard.PointToScreen(new Point(0, 0));
+                b = fullCard.PointToScreen(new Point(fullCard.ActualWidth, fullCard.ActualHeight));
+            }
+            catch (InvalidOperationException) { return; }
+            // tebal ruang yang dipesan = tepi layar sampai sisi dalam kartu dock (+ celah kecil)
+            int gap = (int)Math.Round(6 * Scale());
+            int thick = Layout.Side == 1 ? (int)Math.Max(a.X, b.X) + gap - m.left
+                      : Layout.Side == 2 ? m.right - ((int)Math.Min(a.X, b.X) - gap)
+                      : m.bottom - ((int)Math.Min(a.Y, b.Y) - gap);
+            if (thick <= 0) return;
+            if (thick == lastBarThick && Layout.Side == lastBarSide && m.left == lastBarMon.left && m.top == lastBarMon.top
+                && m.right == lastBarMon.right && m.bottom == lastBarMon.bottom) return;
+            lastBarThick = thick;
+            lastBarSide = Layout.Side;
+            lastBarMon = m;
             APPBARDATA d = new APPBARDATA();
             d.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
             d.hWnd = hwnd;
-            d.uEdge = 3;
-            d.rc.left = 0; d.rc.right = screenW; d.rc.bottom = screenH; d.rc.top = top;
-            Native.SHAppBarMessage(2, ref d);
-            d.rc.top = d.rc.bottom - (screenH - top);
-            Native.SHAppBarMessage(3, ref d);
+            d.uEdge = Layout.Side == 1 ? 0u : Layout.Side == 2 ? 2u : 3u;   // ABE_LEFT / ABE_RIGHT / ABE_BOTTOM
+            d.rc = m;
+            Native.SHAppBarMessage(2, ref d);                     // ABM_QUERYPOS: Windows boleh menyesuaikan kotaknya
+            if (Layout.Side == 1) d.rc.right = d.rc.left + thick;
+            else if (Layout.Side == 2) d.rc.left = d.rc.right - thick;
+            else d.rc.top = d.rc.bottom - thick;
+            Native.SHAppBarMessage(3, ref d);                     // ABM_SETPOS
         }
 
         void RemoveAppBar()
@@ -9974,7 +10763,7 @@ namespace SlideDock
             APPBARDATA d = new APPBARDATA();
             d.cbSize = Marshal.SizeOf(typeof(APPBARDATA));
             d.hWnd = hwnd;
-            Native.SHAppBarMessage(1, ref d);
+            Native.SHAppBarMessage(1, ref d);                     // ABM_REMOVE: area kerja kembali penuh
             appBarOn = false;
         }
 
@@ -10036,7 +10825,7 @@ namespace SlideDock
         IntPtr showHookHandle, uncloakHookHandle;
 
         // ----- jendela baru tidak masuk ke belakang dock -----
-        // Dock tidak memesan ruang layar (ReserveSpace = false), jadi Windows boleh menaruh jendela sampai dasar
+        // Mode Floating: dock tidak memesan ruang layar, jadi Windows boleh menaruh jendela sampai dasar
         // layar. Jendela yang baru terbuka tidak maximize dan bagian bawahnya masuk ke belakang dock (mis. File
         // Explorer yang membuka dengan ukuran tersimpan) digeser ke atas dock; bila tidak muat, dikecilkan.
         // Jendela maximize/fullscreen dan jendela yang dipindah sendiri oleh pengguna tidak diubah.
@@ -10052,6 +10841,7 @@ namespace SlideDock
             try
             {
                 if (hwnd == IntPtr.Zero || !IsVisible || hiddenForFullscreen || fullCard == null || fullCard.ActualWidth <= 0) return;
+                if (Prefs.DockMode == 2) return;                          // Auto-hide: dock tersembunyi, jendela boleh sampai tepi
                 if (!IsWindowVisible(h) || Native.IsIconic(h) || IsZoomed(h)) return;
                 int cloaked;
                 if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return;
@@ -10171,6 +10961,12 @@ namespace SlideDock
             {
                 handled = true;
                 if (OnToggle != null) OnToggle();
+            }
+            // app bar lain di tepi yang sama berubah (mis. dock lama ditutup saat ganti posisi): hitung ulang ruangnya
+            else if (appBarOn && msg == (int)appBarMsg && wParam.ToInt32() == 1)   // ABN_POSCHANGED
+            {
+                lastBarThick = -1;
+                Dispatcher.BeginInvoke(new Action(UpdateAppBar), DispatcherPriority.Background);
             }
             return IntPtr.Zero;
         }
@@ -10619,6 +11415,7 @@ namespace SlideDock
                 calTimer.Tick += delegate { calTimer.Interval = TimeSpan.FromMinutes(15); CalData.Refresh(app.Dispatcher, false); };
                 calTimer.Start();
 
+                Action applyDock = delegate { foreach (DockWindow d in docks) d.ApplyPrefs(); };
                 // Dock settings di Start: tiap pilihan langsung berlaku
                 string[] themeKeys = new string[] { "glass", "glass2", "dark" };
                 start.SettingsProvider = delegate
@@ -10644,15 +11441,75 @@ namespace SlideDock
                     l.Add(new DockSetting { Section = "Appearance", Label = "Magnify on hover", Choices = new string[] { "Off", "Subtle", "Strong" },
                         Get = delegate { return Prefs.Magnify; },
                         Set = delegate(int i) { Prefs.Magnify = i; } });
-                    l.Add(new DockSetting { Section = "Behavior", Label = "Shrink to notch when idle", Toggle = true,
-                        Get = delegate { return Prefs.Notch ? 1 : 0; },
-                        Set = delegate(int i) { Prefs.Notch = i != 0; } });
-                    l.Add(new DockSetting { Section = "Behavior", Label = "Drag notch & dock along the edge", Toggle = true,
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Open app indicator", Choices = new string[] { "Line", "Dot", "None" },
+                        Get = delegate { return Prefs.Indicator; },
+                        Set = delegate(int i) { Prefs.Indicator = i; applyDock(); } });
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Clock", Choices = new string[] { "24-hour", "12-hour" },
+                        Get = delegate { return Prefs.Clock12 ? 1 : 0; },
+                        Set = delegate(int i) { Prefs.Clock12 = i == 1; applyDock(); } });
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Show date under the clock", Toggle = true,
+                        Get = delegate { return Prefs.ShowDate ? 1 : 0; },
+                        Set = delegate(int i) { Prefs.ShowDate = i != 0; applyDock(); } });
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Battery percentage on the dock", Toggle = true,
+                        Get = delegate { return Prefs.BatteryPct ? 1 : 0; },
+                        Set = delegate(int i) { Prefs.BatteryPct = i != 0; applyDock(); } });
+                    l.Add(new DockSetting { Section = "Appearance", Label = "Volume & battery panels", Choices = new string[] { "Simple", "Detailed" },
+                        Get = delegate { return Prefs.SimplePanels ? 0 : 1; },
+                        Set = delegate(int i) { Prefs.SimplePanels = i == 0; } });
+
+                    // ---- perilaku dock ----
+                    int mode = Prefs.DockMode;
+                    l.Add(new DockSetting { Section = "Dock behavior", Label = "Dock mode", Choices = new string[] { "Floating", "Fixed", "Auto-hide" },
+                        Get = delegate { return Prefs.DockMode; },
+                        Set = delegate(int i) { Prefs.DockMode = i; applyDock(); } });
+                    l.Add(new DockSetting { Section = "Dock behavior", Label =
+                        mode == 1 ? "Like the taskbar: the dock always shows and maximized apps stop at its edge." :
+                        mode == 2 ? "The dock stays hidden until you move the pointer to the edge of the screen." :
+                                    "The dock floats over apps and can shrink to a small notch." });
+                    if (mode == 0)
+                        l.Add(new DockSetting { Section = "Dock behavior", Label = "Shrink to notch when idle", Toggle = true,
+                            Get = delegate { return Prefs.Notch ? 1 : 0; },
+                            Set = delegate(int i) { Prefs.Notch = i != 0; } });
+                    l.Add(new DockSetting { Section = "Dock behavior", Label = mode == 0 ? "Drag notch & dock along the edge" : "Drag the dock along the edge", Toggle = true,
                         Get = delegate { return Prefs.DockMove ? 1 : 0; },
                         Set = delegate(int i) { Prefs.DockMove = i != 0; foreach (DockWindow d in docks) d.ApplySlide(true); } });
-                    l.Add(new DockSetting { Section = "Behavior", Label = "Start with Windows", Toggle = true,
+                    l.Add(new DockSetting { Section = "Dock behavior", Label = "Hide the dock in fullscreen apps", Toggle = true,
+                        Get = delegate { return Prefs.HideFullscreen ? 1 : 0; },
+                        Set = delegate(int i) { Prefs.HideFullscreen = i != 0; } });
+                    l.Add(new DockSetting { Section = "Dock behavior", Label = "Start with Windows", Toggle = true,
                         Get = delegate { return AutoStartOn() ? 1 : 0; },
                         Set = delegate(int i) { SetAutoStart(i != 0); auto.Checked = AutoStartOn(); } });
+
+                    // ---- isi dock ----
+                    l.Add(new DockSetting { Section = "Dock contents", Label = "Show apps", Choices = new string[] { "Pinned & open", "Pinned only", "Open only" },
+                        Get = delegate { return Prefs.ShowApps; },
+                        Set = delegate(int i) { Prefs.ShowApps = i; applyDock(); } });
+                    if (WF.Screen.AllScreens.Length > 1)
+                        l.Add(new DockSetting { Section = "Dock contents", Label = "Show open apps from", Choices = new string[] { "All screens", "This screen" },
+                            Get = delegate { return Prefs.AppsFrom; },
+                            Set = delegate(int i) { Prefs.AppsFrom = i; applyDock(); } });
+                    string[][] parts = new string[][] {
+                        new string[] { "start", "Start button" }, new string[] { "search", "Search" }, new string[] { "bin", "Recycle Bin" },
+                        new string[] { "wifi", "Wi-Fi" }, new string[] { "volume", "Volume" }, new string[] { "battery", "Battery" },
+                        new string[] { "clock", "Clock & calendar" } };
+                    foreach (string[] p in parts)
+                    {
+                        string key = p[0];
+                        l.Add(new DockSetting { Section = "Dock contents", Label = "Show " + p[1], Toggle = true,
+                            Get = delegate { return Prefs.Shows(key) ? 1 : 0; },
+                            Set = delegate(int i) { Prefs.SetShows(key, i != 0); applyDock(); } });
+                    }
+
+                    // ---- interaksi ----
+                    l.Add(new DockSetting { Section = "Interaction", Label = "Click an open app", Choices = new string[] { "Show", "Show or minimize" },
+                        Get = delegate { return Prefs.ClickOpen; },
+                        Set = delegate(int i) { Prefs.ClickOpen = i; } });
+                    l.Add(new DockSetting { Section = "Interaction", Label = "Middle-click an app", Choices = new string[] { "New window", "Close", "Nothing" },
+                        Get = delegate { return Prefs.MiddleClick; },
+                        Set = delegate(int i) { Prefs.MiddleClick = i; } });
+                    l.Add(new DockSetting { Section = "Interaction", Label = "Window previews on hover", Toggle = true,
+                        Get = delegate { return Prefs.Previews ? 1 : 0; },
+                        Set = delegate(int i) { Prefs.Previews = i != 0; if (i == 0) foreach (DockWindow d in docks) d.HidePreview(); } });
                     string country = CalData.CountryName;
                     l.Add(new DockSetting { Section = "Calendar", Label = "Public holidays in " + country + " (from your Windows region)", Toggle = true,
                         Get = delegate { return CalData.HolidaysOn ? 1 : 0; },

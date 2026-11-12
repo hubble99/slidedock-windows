@@ -29,14 +29,19 @@ Updating downloads the new `SlideDock.exe`, checks its SHA-256 checksum, swaps t
 - **Dock** with pinned and running apps, live window previews (hover), magnify on hover. Drag a pinned icon left or right (up or down on a side dock) to change the order
 - **Drag files into apps**: drag a file from Explorer onto an app icon (dock or notch), then hold it over a window preview; that window comes to the front so you can drop the file into it (e.g. WhatsApp Web, upload forms)
 - **Notch mode**: shrinks to a small pill when idle. When the mouse comes near, the notch stretches out a little like a loading bar and only opens the full dock if the mouse stays. Clicking an empty part of the notch opens the dock right away. App icons in the notch work like the dock: hover for window previews, click to switch
-- **Start**: your chosen apps (drag to reorder), clock, Wi‑Fi/battery/disk info, background (tray) apps, PC settings, Dock settings, Task Manager, power buttons (update-aware Restart/Shut down)
+- **Start**: your chosen apps (drag an icon to a new spot; the other icons slide aside to make room), clock, Wi‑Fi/battery/disk info, background (tray) apps, PC settings, Dock settings, Task Manager, power buttons (update-aware Restart/Shut down)
 - **Search** for apps, files and the web
 - **Status icons**: Wi‑Fi, volume and a battery ring (blue bolt while charging); each icon opens its own panel (Wi‑Fi list, volume, battery), scroll on the volume icon to change volume
 - **Quick Settings**: brightness, volume, Wi‑Fi list and connect, Bluetooth on/off with paired and nearby devices (pair, connect or disconnect headphones and speakers, remove)
 - **Calendar + notifications** (dismiss one or clear all). Click a date to see that day: public holidays for your country (taken from Windows *Country or region*, shown as red dates, names in the local language or English), observances, and your Google Calendar events. **Open in Google Calendar** and **+ Event** open that day in your browser
 - **Google Calendar (read-only)**: paste your calendar's *Secret address in iCal format* in Dock settings → Calendar. Events show as blue dots and in the day panel; the link is stored encrypted for your Windows account. Works with any iCal link (Outlook, iCloud)
 - **Themes**: Glass 1 (dark frosted glass, white text), Glass 2 (bright white frosted glass, black text) or Dark
-- **Dock settings** in Start: theme, position, dock size (Auto picks a smaller dock on small screens), magnify strength, drag the notch or dock along its edge (the dock opens from wherever the notch sits), notch, start with Windows, updates. Changes apply right away
+- **Dock settings** in Start, changes apply right away:
+  - **Appearance**: theme, position, dock size (Auto picks a smaller dock on small screens), magnify strength, open-app indicator (line, dot or none), 12- or 24-hour clock, date and battery percentage on the dock, Simple (icon buttons) or Detailed volume and battery panels
+  - **Dock behavior**: Floating (floats over apps, can shrink to a notch), Fixed (like the taskbar: maximized apps stop at the dock) or Auto-hide (appears when the pointer touches the screen edge); drag the notch or dock along its edge; hide in fullscreen apps; start with Windows
+  - **Dock contents**: pinned and open apps, pinned only or open only; open apps from all screens or only this one; show or hide the Start button, Search, Recycle Bin, Wi-Fi, Volume, Battery and the clock
+  - **Interaction**: clicking an open app shows it or also minimizes it, middle-click opens a new window or closes the app, window previews on hover
+  - Calendar and updates
 - **Position**: bottom, left or right; one dock per monitor, per‑monitor DPI. Popups (Start, calendar, status panels) open next to the dock wherever it is
 - **Windows key** always opens SlideDock's Start (except in fullscreen games and presentations). The old Windows taskbar stays hidden while SlideDock runs
 - Works in any Windows display language (Wi‑Fi is read through the Windows WLAN API, not command output)
@@ -51,7 +56,7 @@ Updating downloads the new `SlideDock.exe`, checks its SHA-256 checksum, swaps t
 Double-click `SlideDock.exe`. The Windows taskbar is hidden while SlideDock runs.
 
 **Options**: open Start → **Dock settings** (✎ icon, top right), or right-click the Start button / an empty area of the dock:
-- Theme, position, size, magnify, dragging, notch
+- Theme, position, size, magnify, dragging, notch, dock mode, which icons the dock shows
 - Start with Windows, on from the first run (creates a Task Scheduler task named "SlideDock" that runs at sign-in, plus a Startup-apps entry as a backup in case the task can't run on that PC)
 - Open settings folder
 - **Exit SlideDock (restore taskbar)**: closes the dock and brings the normal taskbar back
