@@ -9865,6 +9865,11 @@ namespace SlideDock
             string cls = cs.ToString();
             if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd") return false;
             if (IsZoomed(fg)) return false;
+            // jendela biasa dengan title bar yang kebetulan seukuran layar (mis. File Explorer Windows 11 yang
+            // membuka "tidak maximize" tapi selebar layar) bukan fullscreen: dulu dock & notch ikut hilang.
+            // Fullscreen sungguhan (video/F11, game, slideshow) selalu tanpa title bar.
+            const int WS_CAPTION = 0x00C00000;
+            if ((Native.GetWindowLong(fg, -16) & WS_CAPTION) == WS_CAPTION && cls != "ApplicationFrameWindow") return false;
             RECT r;
             if (!GetWindowRect(fg, out r)) return false;
             WF.Screen fgScreen = WF.Screen.FromHandle(fg);
