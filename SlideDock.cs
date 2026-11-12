@@ -9991,6 +9991,27 @@ namespace SlideDock
             };
             topHookHandle = SetWinEventHook(0x0003, 0x0017, IntPtr.Zero, topHook, 0, 0, 0x0002);   // OUTOFCONTEXT | SKIPOWNPROCESS
             Closed += delegate { if (topHookHandle != IntPtr.Zero) UnhookWinEvent(topHookHandle); topHookHandle = IntPtr.Zero; };
+
+            // jendela app yang baru tampil (SHOW) atau baru dibuka dari keadaan tersembunyi Windows 11
+            // (UNCLOAKED, mis. File Explorer) dan masuk ke belakang dock: digeser ke atas dock
+            showHook = delegate(IntPtr hk, uint ev, IntPtr w, int obj, int child, uint thread, uint time)
+            {
+                if (obj != 0 || child != 0 || w == IntPtr.Zero) return;
+                if (GetAncestor(w, 2) != w) return;                     // GA_ROOT: jendela utama saja
+                // tunggu sebentar: app biasanya baru selesai mengatur posisi/ukurannya sesudah tampil
+                DispatcherTimer dt = new DispatcherTimer(DispatcherPriority.Background, Dispatcher);
+                dt.Interval = TimeSpan.FromMilliseconds(250);
+                dt.Tick += delegate { dt.Stop(); FitAboveDock(w); };
+                dt.Start();
+            };
+            showHookHandle = SetWinEventHook(0x8002, 0x8002, IntPtr.Zero, showHook, 0, 0, 0x0002);       // EVENT_OBJECT_SHOW
+            uncloakHookHandle = SetWinEventHook(0x8018, 0x8018, IntPtr.Zero, showHook, 0, 0, 0x0002);    // EVENT_OBJECT_UNCLOAKED
+            Closed += delegate
+            {
+                if (showHookHandle != IntPtr.Zero) UnhookWinEvent(showHookHandle);
+                if (uncloakHookHandle != IntPtr.Zero) UnhookWinEvent(uncloakHookHandle);
+                showHookHandle = uncloakHookHandle = IntPtr.Zero;
+            };
         }
 
         // ----- dock selalu di lapisan paling atas -----
@@ -10006,6 +10027,86 @@ namespace SlideDock
         [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int v, int size);
         WinEventProc topHook;                // disimpan agar tidak dibersihkan GC selama hook terpasang
         IntPtr topHookHandle;
+        WinEventProc showHook;
+        IntPtr showHookHandle, uncloakHookHandle;
+
+        // ----- jendela baru tidak masuk ke belakang dock -----
+        // Dock tidak memesan ruang layar (ReserveSpace = false), jadi Windows boleh menaruh jendela sampai dasar
+        // layar. Jendela yang baru terbuka tidak maximize dan bagian bawahnya masuk ke belakang dock (mis. File
+        // Explorer yang membuka dengan ukuran tersimpan) digeser ke atas dock; bila tidak muat, dikecilkan.
+        // Jendela maximize/fullscreen dan jendela yang dipindah sendiri oleh pengguna tidak diubah.
+        [StructLayout(LayoutKind.Sequential)] struct MONINFO { public int cbSize; public RECT rcMonitor; public RECT rcWork; public int dwFlags; }
+        [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+        [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+        [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr mon, ref MONINFO mi);
+        [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] static extern int DwmGetWindowRect(IntPtr h, int attr, out RECT r, int size);
+        [DllImport("user32.dll", EntryPoint = "SetWindowPos")] static extern bool MoveWin(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        void FitAboveDock(IntPtr h)
+        {
+            try
+            {
+                if (hwnd == IntPtr.Zero || !IsVisible || hiddenForFullscreen || fullCard == null || fullCard.ActualWidth <= 0) return;
+                if (!IsWindowVisible(h) || Native.IsIconic(h) || IsZoomed(h)) return;
+                int cloaked;
+                if (DwmGetWindowAttribute(h, 14, out cloaked, 4) == 0 && cloaked != 0) return;
+                uint pid;
+                Native.GetWindowThreadProcessId(h, out pid);
+                if (pid == ownPid) return;
+                if (GetWindow(h, 4) != IntPtr.Zero) return;               // GW_OWNER: dialog milik jendela lain dibiarkan
+                const int WS_CAPTION = 0x00C00000, WS_THICKFRAME = 0x00040000;
+                const int WS_EX_TOPMOST = 0x8, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x08000000;
+                int st = Native.GetWindowLong(h, -16), ex = Native.GetWindowLong(h, Native.GWL_EXSTYLE);
+                if ((st & WS_CAPTION) != WS_CAPTION) return;               // jendela app biasa (punya title bar) saja
+                if ((ex & (WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0) return;
+                // hanya jendela di layar yang sama dengan dock ini
+                IntPtr mon = MonitorFromWindow(h, 2);
+                if (mon != MonitorFromWindow(hwnd, 2)) return;
+                MONINFO mi = new MONINFO();
+                mi.cbSize = Marshal.SizeOf(typeof(MONINFO));
+                if (!GetMonitorInfo(mon, ref mi)) return;
+
+                // area dock yang terlihat saat terbuka penuh (notch akan membuka ke ukuran ini)
+                Point a = fullCard.PointToScreen(new Point(0, 0));
+                Point b = fullCard.PointToScreen(new Point(fullCard.ActualWidth, fullCard.ActualHeight));
+                int dl = (int)Math.Min(a.X, b.X), dt = (int)Math.Min(a.Y, b.Y), dr = (int)Math.Max(a.X, b.X), db = (int)Math.Max(a.Y, b.Y);
+                int gap = (int)Math.Round(8 * Scale());
+
+                // bingkai yang terlihat (tanpa tepi transparan untuk resize) vs. kotak jendela sebenarnya
+                RECT wr, fr;
+                if (!GetWindowRect(h, out wr)) return;
+                if (DwmGetWindowRect(h, 9, out fr, Marshal.SizeOf(typeof(RECT))) != 0) fr = wr;   // DWMWA_EXTENDED_FRAME_BOUNDS
+                if (fr.right <= dl || fr.left >= dr || fr.bottom <= dt || fr.top >= db) return;   // tidak menyentuh dock
+                int bl = fr.left - wr.left, bt = fr.top - wr.top, br = wr.right - fr.right, bb = wr.bottom - fr.bottom;
+                bool resizable = (st & WS_THICKFRAME) != 0;
+                int x = fr.left, y = fr.top, w = fr.right - fr.left, hgt = fr.bottom - fr.top;
+                RECT work = mi.rcWork;
+
+                if (Layout.Side == 0)                   // dock bawah: dasar jendela berhenti di atas dock
+                {
+                    int limit = dt - gap;
+                    y = limit - hgt;
+                    if (y < work.top) { y = work.top; if (resizable) hgt = limit - work.top; }
+                }
+                else if (Layout.Side == 1)              // dock kiri: tepi kiri jendela mulai di kanan dock
+                {
+                    int limit = dr + gap;
+                    x = limit;
+                    if (x + w > work.right) { if (resizable) w = work.right - limit; else x = Math.Max(work.left, work.right - w); }
+                }
+                else                                     // dock kanan: tepi kanan jendela berhenti di kiri dock
+                {
+                    int limit = dl - gap;
+                    x = limit - w;
+                    if (x < work.left) { x = work.left; if (resizable) w = limit - work.left; }
+                }
+                if (w < 200 || hgt < 150) return;      // layar terlalu sempit: biarkan seperti semula
+                if (x == fr.left && y == fr.top && w == fr.right - fr.left && hgt == fr.bottom - fr.top) return;
+                const uint f = 0x0004 | 0x0010 | 0x0200;                  // NOZORDER | NOACTIVATE | NOOWNERZORDER
+                MoveWin(h, IntPtr.Zero, x - bl, y - bt, w + bl + br, hgt + bt + bb, f);
+            }
+            catch (InvalidOperationException) { }
+        }
 
         void KeepOnTop()
         {
