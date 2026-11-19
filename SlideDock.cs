@@ -9193,9 +9193,14 @@ namespace SlideDock
                 MenuCloser.CloseAll();
                 EndPeek(true);                                // menggeser notch tidak membuka dock
             }
-            slideTarget = Math.Max(-1, Math.Min(1, dragFrom + delta / DockScale / dragRange));
+            double f = Math.Max(-1, Math.Min(1, dragFrom + delta / DockScale / dragRange));
+            // magnet di tengah: dalam jarak SnapCenter (DIP layar) dari tengah, dock menempel tepat di tengah
+            if (Math.Abs(f * dragRange * DockScale) < SnapCenter) f = 0;
+            slideTarget = f;
             StartSlideLoop();
         }
+
+        const double SnapCenter = 28;
 
         void EndDrag()
         {
