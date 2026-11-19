@@ -5497,6 +5497,132 @@ namespace SlideDock
         }
     }
 
+    // ----- output suara: daftar speaker/headset aktif dan ganti perangkat default -----
+    // Windows tidak punya API publik untuk mengganti perangkat default. Pengaturan Suara memakai IPolicyConfig;
+    // cara yang sama dipakai di sini. Method sebelum SetDefaultEndpoint hanya pengisi urutan vtable (tidak dipanggil).
+    [ComImport, Guid("870AF99C-171D-4F9E-AF0D-E63DF40C2BC9")]
+    class PolicyConfigCom { }
+
+    [ComImport, Guid("F8679F50-850A-41CF-9C72-430F290290C8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPolicyConfig
+    {
+        [PreserveSig] int GetMixFormat();
+        [PreserveSig] int GetDeviceFormat();
+        [PreserveSig] int ResetDeviceFormat();
+        [PreserveSig] int SetDeviceFormat();
+        [PreserveSig] int GetProcessingPeriod();
+        [PreserveSig] int SetProcessingPeriod();
+        [PreserveSig] int GetShareMode();
+        [PreserveSig] int SetShareMode();
+        [PreserveSig] int GetPropertyValue();
+        [PreserveSig] int SetPropertyValue();
+        [PreserveSig] int SetDefaultEndpoint([MarshalAs(UnmanagedType.LPWStr)] string id, int role);
+    }
+
+    class AudioOut
+    {
+        public string Id;
+        public string Name;                 // "Speakers", "Headphones", atau nama yang diberi pengguna
+        public string Sub;                  // nama perangkat keras, mis. "Realtek(R) Audio"
+        public int Form = 10;               // EndpointFormFactor: 1 speaker, 3 headphone, 5 headset, 9 HDMI/monitor
+        public bool Default;
+    }
+
+    static class AudioOuts
+    {
+        static readonly PROPERTYKEY PkForm = new PROPERTYKEY { fmtid = new Guid("1da5d803-d492-4edd-8c23-e0c0ffee7f0e"), pid = 0 };
+        static readonly PROPERTYKEY PkDesc = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 2 };
+        static readonly PROPERTYKEY PkFriendly = new PROPERTYKEY { fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"), pid = 14 };
+        static readonly PROPERTYKEY PkIface = new PROPERTYKEY { fmtid = new Guid("026e516e-b814-414b-83cd-856d6fef4822"), pid = 2 };
+
+        [DllImport("ole32.dll")] static extern int PropVariantClear(ref PROPVARIANT v);
+
+        static string Str(IPropertyStore ps, PROPERTYKEY k)
+        {
+            PROPVARIANT v;
+            if (ps.GetValue(ref k, out v) != 0) return null;
+            try { return v.vt == 31 && v.p != IntPtr.Zero ? Marshal.PtrToStringUni(v.p) : null; }
+            finally { PropVariantClear(ref v); }
+        }
+
+        static int UInt(IPropertyStore ps, PROPERTYKEY k, int fallback)
+        {
+            PROPVARIANT v;
+            if (ps.GetValue(ref k, out v) != 0) return fallback;
+            try { return v.vt == 19 ? (int)(v.p.ToInt64() & 0xFFFFFFFF) : fallback; }
+            finally { PropVariantClear(ref v); }
+        }
+
+        // perangkat output yang aktif (tercolok/tersambung), default ditandai
+        public static List<AudioOut> List()
+        {
+            List<AudioOut> res = new List<AudioOut>();
+            try
+            {
+                IMMDeviceEnumeratorFull en = (IMMDeviceEnumeratorFull)new MMDeviceEnumeratorCom();
+                string def = null;
+                IMMDeviceFull d0;
+                if (en.GetDefaultAudioEndpoint(0, 0, out d0) == 0 && d0 != null) d0.GetId(out def);
+                IMMDeviceCollection col;
+                if (en.EnumAudioEndpoints(0, 1, out col) != 0 || col == null) return res;
+                uint n;
+                col.GetCount(out n);
+                for (uint i = 0; i < n; i++)
+                {
+                    try
+                    {
+                        IMMDeviceFull dev;
+                        if (col.Item(i, out dev) != 0 || dev == null) continue;
+                        AudioOut a = new AudioOut();
+                        if (dev.GetId(out a.Id) != 0 || a.Id == null) continue;
+                        a.Default = a.Id == def;
+                        IPropertyStore ps;
+                        if (dev.OpenPropertyStore(0, out ps) == 0 && ps != null)
+                        {
+                            a.Name = Str(ps, PkDesc);
+                            a.Sub = Str(ps, PkIface);
+                            a.Form = UInt(ps, PkForm, 10);
+                            if (string.IsNullOrEmpty(a.Name)) { a.Name = Str(ps, PkFriendly); a.Sub = null; }
+                        }
+                        if (string.IsNullOrEmpty(a.Name)) a.Name = "Audio device";
+                        res.Add(a);
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return res;
+        }
+
+        // jadikan default untuk semua peran (konsol, multimedia, komunikasi), sama seperti Pengaturan Suara
+        public static bool SetDefault(string id)
+        {
+            try
+            {
+                IPolicyConfig pc = (IPolicyConfig)new PolicyConfigCom();
+                bool ok = false;
+                for (int role = 0; role < 3; role++) if (pc.SetDefaultEndpoint(id, role) == 0) ok = true;
+                return ok;
+            }
+            catch { return false; }
+        }
+
+        public static string Glyph(AudioOut a)
+        {
+            switch (a.Form)
+            {
+                case 3: return "";            // headphone
+                case 5: case 6: return "";    // headset
+                case 9: return "";            // HDMI / monitor
+                case 1: return "";            // speaker
+            }
+            string s = ((a.Name ?? "") + " " + (a.Sub ?? "")).ToLowerInvariant();
+            if (s.Contains("headphone") || s.Contains("earbud") || s.Contains("buds")) return "";
+            if (s.Contains("headset") || s.Contains("hands-free")) return "";
+            return "";
+        }
+    }
+
     class BtPanel : StackPanel
     {
         readonly StackPanel list = new StackPanel();
@@ -6390,6 +6516,7 @@ namespace SlideDock
                 volIcon2.Margin = new Thickness(0, 12, 0, 0);
                 volIcon2.HorizontalAlignment = HorizontalAlignment.Center;
                 soundView.Children.Add(volIcon2);
+                AddOutputs(new Thickness(0, 14, 0, 0));
                 StackPanel links = IconRow(OpenLink(GlyphSettings, "Sound settings", "ms-settings:sound"), QuickLink());
                 links.HorizontalAlignment = HorizontalAlignment.Center;
                 links.Margin = new Thickness(-2, 12, 0, 0);
@@ -6417,6 +6544,137 @@ namespace SlideDock
             FrameworkElement row = SliderRow(volIcon2, volume2);
             row.Margin = new Thickness(0, 8, 4, 0);
             soundView.Children.Add(row);
+            AddOutputs(new Thickness(0, 12, 4, 0));
+        }
+
+        // ----- output suara: Speakers / Headphones / ...; klik = jadikan perangkat default -----
+        readonly TextBlock outLabel = new TextBlock();
+        Panel outHost;                                // StackPanel (baris) atau WrapPanel (ikon, dock samping)
+
+        // judul kecil "Output" + daftar; dipasang di bawah slider volume
+        void AddOutputs(Thickness margin)
+        {
+            Detach(outLabel);
+            if (outHost != null) Detach(outHost);
+            outLabel.Text = "Output";
+            outLabel.Foreground = UI.Ink(0x90);
+            outLabel.FontSize = 11.5;
+            outLabel.FontFamily = UI.Text;
+            outLabel.Margin = Layout.V ? new Thickness(0, 0, 0, 6) : new Thickness(4, 0, 0, 4);
+            outLabel.HorizontalAlignment = Layout.V ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+            if (Layout.V)
+            {
+                WrapPanel w = new WrapPanel();
+                w.HorizontalAlignment = HorizontalAlignment.Center;
+                outHost = w;
+            }
+            else outHost = new StackPanel();
+            StackPanel box = new StackPanel();
+            box.Margin = margin;
+            box.Children.Add(outLabel);
+            box.Children.Add(outHost);
+            soundView.Children.Add(box);
+        }
+
+        void RenderOutputs()
+        {
+            if (outHost == null) return;
+            outHost.Children.Clear();
+            List<AudioOut> outs = AudioOuts.List();
+            FrameworkElement box = (FrameworkElement)outHost.Parent;
+            box.Visibility = outs.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+            foreach (AudioOut a in outs) outHost.Children.Add(Layout.V ? OutputIcon(a) : OutputRow(a));
+        }
+
+        void PickOutput(AudioOut a)
+        {
+            if (a.Default) return;
+            AudioOuts.SetDefault(a.Id);
+            SysInfo.ResetAudio();                     // volume & mute sekarang milik perangkat baru
+            LoadData();
+        }
+
+        // baris: [ikon] nama / perangkat keras ......... [centang]; ikon sejajar dengan ikon volume di atasnya
+        FrameworkElement OutputRow(AudioOut a)
+        {
+            Border b = new Border();
+            b.CornerRadius = new CornerRadius(10);
+            b.Padding = new Thickness(4, 6, 10, 6);
+            b.Margin = new Thickness(0, 1, 0, 1);
+            Brush normal = a.Default ? (Brush)UI.Ink(0x1E) : Brushes.Transparent;
+            b.Background = normal;
+            b.ToolTip = a.Sub == null ? a.Name : a.Name + " (" + a.Sub + ")";
+            if (!a.Default)
+            {
+                b.Cursor = Cursors.Hand;
+                b.MouseEnter += delegate { b.Background = UI.Ink(0x30); };
+                b.MouseLeave += delegate { b.Background = normal; };
+                b.MouseLeftButtonUp += delegate { PickOutput(a); };
+            }
+            Grid g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(22) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            TextBlock ic = UI.Glyph(AudioOuts.Glyph(a), 15);
+            if (a.Default) ic.Foreground = UI.AccentInk;
+            g.Children.Add(ic);
+            StackPanel txt = new StackPanel();
+            txt.Margin = new Thickness(10, 0, 0, 0);
+            txt.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock name = new TextBlock();
+            name.Text = a.Name;
+            name.Foreground = UI.Fg;
+            name.FontSize = 13;
+            name.FontFamily = UI.Text;
+            name.FontWeight = a.Default ? FontWeights.SemiBold : FontWeights.Normal;
+            name.TextTrimming = TextTrimming.CharacterEllipsis;
+            txt.Children.Add(name);
+            if (a.Sub != null)
+            {
+                TextBlock sub = new TextBlock();
+                sub.Text = a.Sub;
+                sub.Foreground = UI.Ink(0x90);
+                sub.FontSize = 11;
+                sub.FontFamily = UI.Text;
+                sub.TextTrimming = TextTrimming.CharacterEllipsis;
+                txt.Children.Add(sub);
+            }
+            Grid.SetColumn(txt, 1);
+            g.Children.Add(txt);
+            if (a.Default)
+            {
+                TextBlock ck = UI.Glyph("", 12);
+                ck.Foreground = UI.AccentInk;
+                ck.Margin = new Thickness(8, 0, 0, 0);
+                Grid.SetColumn(ck, 2);
+                g.Children.Add(ck);
+            }
+            b.Child = g;
+            return b;
+        }
+
+        // dock kiri/kanan: kolom sempit, tiap perangkat jadi tombol ikon (nama di tooltip)
+        FrameworkElement OutputIcon(AudioOut a)
+        {
+            Border b = new Border();
+            b.Width = 36;
+            b.Height = 34;
+            b.Margin = new Thickness(2);
+            b.CornerRadius = new CornerRadius(9);
+            Brush normal = a.Default ? (Brush)UI.Ink(0x26) : Brushes.Transparent;
+            b.Background = normal;
+            b.ToolTip = a.Sub == null ? a.Name : a.Name + " (" + a.Sub + ")";
+            TextBlock ic = UI.Glyph(AudioOuts.Glyph(a), 15);
+            if (a.Default) ic.Foreground = UI.AccentInk;
+            b.Child = ic;
+            if (!a.Default)
+            {
+                b.Cursor = Cursors.Hand;
+                b.MouseEnter += delegate { b.Background = UI.Ink(0x30); };
+                b.MouseLeave += delegate { b.Background = normal; };
+                b.MouseLeftButtonUp += delegate { PickOutput(a); };
+            }
+            return b;
         }
 
         Border[] BatteryLinks()
@@ -6515,6 +6773,7 @@ namespace SlideDock
                 volIcon2.Margin = new Thickness(0, 12, 0, 0);
                 volIcon2.HorizontalAlignment = HorizontalAlignment.Center;
                 soundView.Children.Add(volIcon2);
+                AddOutputs(new Thickness(0, 14, 0, 0));
                 soundView.Children.Add(Footer("", "Sound settings", "ms-settings:sound", true));
                 return;
             }
@@ -6533,6 +6792,7 @@ namespace SlideDock
             FrameworkElement row = SliderRow(volIcon2, volume2);
             row.Margin = new Thickness(0, 12, 0, 2);
             soundView.Children.Add(row);
+            AddOutputs(new Thickness(0, 10, 0, 0));
             soundView.Children.Add(Footer("", "Sound settings", "ms-settings:sound", false));
         }
 
@@ -6635,6 +6895,7 @@ namespace SlideDock
             volume.Value = v < 0 ? 0 : v;
             volume2.Value = volume.Value;
             UpdateVolIcon();
+            if (Mode == "sound") RenderOutputs();
             batText.Text = "Battery " + SysInfo.BatteryText();
             UpdateBattery();
             bool wantSsid = Mode == "all";
